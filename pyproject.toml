@@ -1,0 +1,18 @@
+[project]
+name = "xai-project"
+version = "0.1.0"
+description = "XAI Project"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "gym==0.23.1",
+    "gymnasium==0.28.1",
+    "minigrid==2.2.0",
+    "numpy==1.24.4",
+    "pygame==2.2.0",
+    "stable-baselines3==2.0.0",
+    "tensorboard==2.11.2",
+    "torch==1.12.1",
+    "tqdm>=4.67.1",
+    "tyro==0.5.10",
+]
