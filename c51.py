@@ -14,6 +14,7 @@ import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
+print(f'Torch: {torch.__version__}, cuda on: {torch.cuda.is_available()}')
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -39,13 +40,11 @@ class QNetwork(nn.Module):
         self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
         self.n = env.single_action_space.n
         self.network = nn.Sequential(
-            nn.Linear(np.array(env.single_observation_space.shape).prod(), 512),
+            nn.Linear(np.array(env.single_observation_space.shape).prod(), 128),
             nn.LeakyReLU(),
-            nn.Linear(512, 256),
+            nn.Linear(128, 64),
             nn.LeakyReLU(),
-            nn.Linear(256, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, self.n * n_atoms),
+            nn.Linear(64, self.n * self.n_atoms),
         )
 
     def get_action(self, x, action=None):
@@ -68,7 +67,7 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{start_datetime}"
+    run_name = f"C51_{args.env_id}__{args.exp_name}__{args.seed}__{start_datetime}"
     if args.track:
         import wandb
 
@@ -81,7 +80,7 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
+    writer = SummaryWriter(f"C51/runs/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -94,7 +93,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = args.device
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
@@ -119,7 +118,7 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     print_step = 5000
-    print(f'Starting training for {args.total_timesteps} timesteps, with print_step={print_step}')
+    print(f"Starting training for {args.total_timesteps} timesteps on {args.env_id}, with print_step={print_step}")
     for global_step in tqdm(range(args.total_timesteps), colour='green'):
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_step)
@@ -131,7 +130,6 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-        # print(f'actions: {actions}, rewards: {rewards}, terminations: {terminations}, truncations: {truncations}, infos: {infos}')
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
@@ -194,21 +192,37 @@ if __name__ == "__main__":
             if global_step % args.target_network_frequency == 0:
                 target_network.load_state_dict(q_network.state_dict())
 
+    plt.plot(episodes_returns)
+    plt.title(f'C51 on {args.env_id} - Return over {args.total_timesteps} timesteps')
+    plt.xlabel("Episode")
+    plt.ylabel("Return")
+    plt.grid(True)
+    path = f'C51/{args.env_id}_c51_{args.total_timesteps}_{start_datetime}'
+    if not os.path.exists("C51/"):
+        os.makedirs("C51/")
+    os.makedirs(path)
+    plt.savefig(f"{path}/{args.env_id}_c51_{args.total_timesteps}_{start_datetime}.png")
+    with open(f"{path}/c51_args.txt", "w") as f:
+        for key, value in vars(args).items():
+            if key == "env_id":
+                f.write("# C51 Algorithm specific arguments\n")
+            f.write(f"{key}: {value}\n")
+
     if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        model_path = f"{path}/c51_model.pt"
         model_data = {
             "model_weights": q_network.state_dict(),
             "args": vars(args),
         }
         torch.save(model_data, model_path)
         print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.c51_eval import evaluate
-
+        from c51_eval import evaluate
+        eval_episodes=100000
         episodic_returns = evaluate(
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=10,
+            eval_episodes=eval_episodes,
             run_name=f"{run_name}-eval",
             Model=QNetwork,
             device=device,
@@ -217,6 +231,14 @@ if __name__ == "__main__":
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
+        plt.figure()
+        plt.plot(episodic_returns)
+        plt.title(f'C51Eval on {args.env_id} - Return over {eval_episodes} episodes')
+        plt.xlabel("Episode")
+        plt.ylabel("Return")
+        plt.grid(True)
+        plt.savefig(f"{path}/{args.env_id}_c51_{args.total_timesteps}_{start_datetime}_eval.png")
+
         if args.upload_model:
             from cleanrl_utils.huggingface import push_to_hub
 
@@ -224,13 +246,5 @@ if __name__ == "__main__":
             repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
             push_to_hub(args, episodic_returns, repo_id, "C51", f"runs/{run_name}", f"videos/{run_name}-eval")
 
-    plt.plot(episodes_returns)
-    plt.title(f'C51 on {args.env_id} - Return over {args.total_timesteps} timesteps')
-    plt.xlabel("Episode")
-    plt.ylabel("Return")
-    plt.grid(True)
-    if not os.path.exists("images/"):
-        os.makedirs("images/")
-    plt.savefig(f"images/c51_{args.total_timesteps}_{start_datetime}.png")
     envs.close()
     writer.close()
