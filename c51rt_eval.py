@@ -52,11 +52,11 @@ if __name__ == "__main__":
     from config import Args
     from datetime import datetime
     start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
-    path_5x5 = "MiniGrid-DoorKey-5x5-v0_c51_100000_2025_01_29-00_43_27"
-    path_6x6 = "MiniGrid-DoorKey-6x6-v0_c51_200000_2025_01_30-00_02_08"
-    path_8x8 = "MiniGrid-DoorKey-8x8-v0_c51_1000000_2025_01_30-12_11_39"
-    path = path_6x6
-    model_path = f"C51/{path}/c51_model.pt"
+    path_5x5 = "MiniGrid-DoorKey-5x5-v0_c51rt_250000_2025_02_07-14_49_17"
+    path_6x6 = "MiniGrid-DoorKey-6x6-v0_c51rt_200000_2025_01_30-14_15_49"
+    path_8x8 = "MiniGrid-DoorKey-8x8-v0_c51rt_1000000_2025_01_30-12_42_55"
+    path = path_5x5
+    model_path = f"C51rt/{path}/c51rt_model.pt"
     eval_episodes = 10000
     episodic_returns = evaluate(
         model_path,
@@ -70,11 +70,11 @@ if __name__ == "__main__":
     )
 
     plt.plot(episodic_returns)
-    plt.title(f"C51Eval on {Args.env_id} - Return over {eval_episodes} episodes")
+    plt.title(f"C51rtEval on {Args.env_id} - Return over {eval_episodes} episodes")
     plt.xlabel("Episode")
     plt.ylabel("Return")
     plt.grid(True)
     plt.savefig(
-        f"C51/{path}/{Args.env_id}_c51eval_{eval_episodes}_{start_datetime}.png"
+        f"C51rt/{path}/{Args.env_id}_c51rteval_{eval_episodes}_{start_datetime}.png"
     )
     print('Evaluation done!')

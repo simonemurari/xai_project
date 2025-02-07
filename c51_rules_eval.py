@@ -148,6 +148,6 @@ if __name__ == "__main__":
     plt.ylabel("Return")
     plt.grid(True)
     plt.savefig(
-        f"C51re/{path}/{Args.env_id}_c51re_{Args.total_timesteps}_{start_datetime}.png"
+        f"C51re/{path}/{Args.env_id}_c51reeval_{eval_episodes}_{start_datetime}.png"
     )
     print('Evaluation done!')

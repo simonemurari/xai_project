@@ -29,7 +29,7 @@ class Args:
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
 
     upload_model: bool = False
@@ -39,13 +39,13 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # C51 Algorithm specific arguments
-    env_id: str = "MiniGrid-DoorKey-6x6-v0"
+    env_id: str = "MiniGrid-DoorKey-8x8-v0"
     """the id of the environment"""
     
-    total_timesteps: int = 100000 # 5x5: 100k, 6x6: 200k, 8x8: 1kk
+    total_timesteps: int = 250000 # 5x5: 100k, 6x6: 200k, 8x8: 1kk
     """total timesteps of the experiments"""
     
-    learning_rate: float =  0.0001 # 5x5 and 6x6: 0.0005, 8x8: 0.0001
+    learning_rate: float =  0.0005 # 5x5 and 6x6: 0.0005, 8x8: 0.0001
     """the learning rate of the optimizer"""
 
     num_envs: int = 1
@@ -60,10 +60,10 @@ class Args:
     v_max: float = 10
     """the return upper bound"""
 
-    buffer_size: int = 500000 # 5x5 and 6x6: 50000, 8x8: 100000
+    buffer_size: int = 30000 # 5x5 and 6x6: 50000, 8x8: 100000
     """the replay memory buffer size"""
 
-    gamma: float = 0.99 # 5x5 and 6x6: 0.95, 8x8: 0.999
+    gamma: float = 0.95 # 5x5 and 6x6: 0.95, 8x8: 0.999
     """the discount factor gamma"""
 
     target_network_frequency: int = 200 # 5x5 and 6x6: 200, 8x8: 500
@@ -81,7 +81,7 @@ class Args:
     exploration_fraction: float = 0.25 # 5x5 and 6x6: 0.3, 8x8: 0.5
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
 
-    learning_starts: int = 50000 # 5x5 and 6x6: 5000, 8x8: 50000
+    learning_starts: int = 5000 # 5x5 and 6x6: 5000, 8x8: 50000
     """timestep to start learning"""
 
     train_frequency: int = 2 # 5x5 and 6x6: 2, 8x8: 4
