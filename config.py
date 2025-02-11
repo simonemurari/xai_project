@@ -17,13 +17,13 @@ class Args:
     device: str = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     """the device to run the experiment on (set it to cuda if using GPU)"""
 
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
 
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "c51"
     """the wandb's project name"""
 
-    wandb_entity: str = None
+    wandb_entity: str = "simone-murari3"
     """the entity (team) of wandb's project"""
 
     capture_video: bool = False
@@ -39,10 +39,10 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # C51 Algorithm specific arguments
-    env_id: str = "MiniGrid-DoorKey-8x8-v0"
+    env_id: str = "MiniGrid-DoorKey-6x6-v0"
     """the id of the environment"""
     
-    total_timesteps: int = 250000 # 5x5: 100k, 6x6: 200k, 8x8: 1kk
+    total_timesteps: int = 100000 # 5x5: 100k, 6x6: 200k, 8x8: 1kk
     """total timesteps of the experiments"""
     
     learning_rate: float =  0.0005 # 5x5 and 6x6: 0.0005, 8x8: 0.0001

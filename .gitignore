@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# .env file
+.env
+
+# wandb
+wandb/

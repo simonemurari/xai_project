@@ -5,6 +5,8 @@ import os
 import gymnasium as gym
 from minigrid.core.constants import IDX_TO_COLOR
 import numpy as np
+import tyro
+from torch.utils.tensorboard import SummaryWriter
 import torch
 from c51_rules_training import make_env, QNetwork
 from config import Args
@@ -114,6 +116,8 @@ def evaluate(
                     print(
                         f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}"
                     )
+                writer.add_scalar("episodic_return", info["episode"]["r"], i)
+                writer.add_scalar("episodic_length", info["episode"]["l"], i)
                 episodic_returns += [info["episode"]["r"]]
         obs = next_obs
 
@@ -126,28 +130,48 @@ if __name__ == "__main__":
     path_c51_5x5 = "MiniGrid-DoorKey-5x5-v0_c51_100000_2025_01_29-00_43_27"
     path_c51_6x6 = "MiniGrid-DoorKey-6x6-v0_c51_200000_2025_01_30-00_02_08"
     path_c51_8x8 = "MiniGrid-DoorKey-8x8-v0_c51_1000000_2025_01_30-12_11_39"
-    path = path_c51_8x8
+    path = path_c51_6x6
     model_path = f"C51/{path}/c51_model.pt"  # change this to the path of the model you want to evaluate
     if os.path.exists(f"C51re/{path}") is False:
         os.makedirs(f"C51re/{path}")
     run_name = f"C51re/{path}/{Args.env_id}_c51re_{Args.total_timesteps}_{start_datetime}"
+    args = tyro.cli(Args)
+    run_name = f"C51re_trainedon={path.split('_')[0]}__testedon={args.env_id}__seed={args.seed}__{start_datetime}"
+    eval_episodes = 10000
+    if args.track:
+        import wandb
+        wandb.tensorboard.patch(root_logdir=f"C51/runs/{run_name}/eval")
+        wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(args),
+            name=run_name,
+            monitor_gym=True,
+            save_code=True,
+        )
+    writer = SummaryWriter(f"C51re/runs/{run_name}/eval")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
     episodic_returns = evaluate(
         model_path,
         make_env,
-        Args.env_id,
+        args.env_id,
         eval_episodes=eval_episodes,
         run_name=f"{run_name}-eval",
         Model=QNetwork,
-        device=Args.device,
+        device=args.device,
         epsilon=0.00,
     )
 
     plt.plot(episodic_returns)
-    plt.title(f"C51 Rules Eval on {Args.env_id} - Return over {eval_episodes} episodes")
+    plt.title(f"C51 Rules Eval on {args.env_id} - Return over {eval_episodes} episodes")
     plt.xlabel("Episode")
     plt.ylabel("Return")
     plt.grid(True)
     plt.savefig(
-        f"C51re/{path}/{Args.env_id}_c51reeval_{eval_episodes}_{start_datetime}.png"
+        f"C51re/{path}/{args.env_id}_c51re_{eval_episodes}_{start_datetime}.png"
     )
     print('Evaluation done!')

@@ -67,10 +67,11 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"C51_{args.env_id}__{args.exp_name}__{args.seed}__{start_datetime}"
+    run_name = f"C51_{args.env_id}__seed={args.seed}__{start_datetime}"
     if args.track:
         import wandb
 
+        wandb.tensorboard.patch(root_logdir=f"C51/runs/{run_name}/train")
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -80,7 +81,7 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"C51/runs/{run_name}")
+    writer = SummaryWriter(f"C51/runs/{run_name}/train")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -138,8 +139,8 @@ if __name__ == "__main__":
                     if global_step >= print_step:
                         tqdm.write(f"global_step={global_step}, episodic_return={info['episode']['r'][0]}, episodic_length={info['episode']['l'][0]}, exploration_rate={epsilon}")
                         print_step += 5000
-                    writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                    writer.add_scalar("episodic_return", info["episode"]["r"], global_step)
+                    writer.add_scalar("episodic_length", info["episode"]["l"], global_step)
                     episodes_returns.append(info["episode"]["r"])
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
@@ -181,7 +182,7 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     old_val = (old_pmfs * q_network.atoms).sum(1)
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
-                    writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+                    writer.add_scalar("SPS", int(global_step / (time.time() - start_time)), global_step)
 
                 # optimize the model
                 optimizer.zero_grad()
@@ -228,8 +229,9 @@ if __name__ == "__main__":
             device=device,
             epsilon=0.05,
         )
+        writer = SummaryWriter(f"C51/runs/{run_name}/eval")
         for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
+            writer.add_scalar("episodic_return", episodic_return, idx)
 
         plt.figure()
         plt.plot(episodic_returns)
