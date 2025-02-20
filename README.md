@@ -33,14 +33,11 @@ In this repository you can find the code to run the C51 algorithm and its variat
    pip install -r requirements.txt
    ```
 
-   Or you can install `uv` and do:
-   ```bash
-   uv run c51.py
-   ```
+   Or you can install `uv` and follow the next steps and it will automatically create a .venv folder with the proper virtual environment the first time you run a script.
 2. **Configure wandb (optional)** \
    If you want to use wandb tracking, create a `.env` file in the repository root and set the proper environment variables (WANDB_PROJECT_NAME, WANDB_ENTITY).
 
 3. **Configure the config.py file**
 
 4. **Run the scripts** \
-   To run the different scripts just do e.g.: ```python baseC51/c51.py``` or ```uv run baseC51/c51.py```
+   To run the different scripts just do e.g.: ```python baseC51/c51.py``` or ```uv run baseC51/c51.py``` if you are using `uv` 
