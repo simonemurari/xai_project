@@ -148,17 +148,17 @@ class QNetwork(nn.Module):
         rule_pmf = s / s.sum()
 
         # # plot pmf
-        x = np.linspace(0, 1, self.n_atoms)
-        plt.figure(figsize=(8, 6))
-        x = np.linspace(0, 1, 51)
-        plt.bar(x, rule_pmf, width=(1 / 51) * 0.8)
-        plt.xlabel("Return Value (Atom)")
-        plt.ylabel("Probability")
-        plt.xlim(-0.05, 1.05)
-        plt.grid(axis='y', alpha=0.75)
-        plt.savefig(f"plots/rule_pmf_{rule_shift}_{rule_scale}.png")
-        plt.close()
-        asfasf
+        # x = np.linspace(0, 1, self.n_atoms)
+        # plt.figure(figsize=(8, 6))
+        # x = np.linspace(0, 1, 51)
+        # plt.bar(x, rule_pmf, width=(1 / 51) * 0.8)
+        # plt.xlabel("Return Value (Atom)")
+        # plt.ylabel("Probability")
+        # plt.xlim(-0.05, 1.05)
+        # plt.grid(axis='y', alpha=0.75)
+        # plt.savefig(f"plots/rule_pmf_{rule_shift}_{rule_scale}.png")
+        # plt.close()
+        # asfasf
         return rule_pmf
 
 

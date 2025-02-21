@@ -25,6 +25,8 @@ In this repository you can find the code to run the C51 algorithm and its variat
 
 ### How to run
 
+0. **Clone this repository**
+
 1. **Create a Python environment**  
    Create a virtual environment with Python 3.10.12 and install the packages. For example, using conda:
    ```bash

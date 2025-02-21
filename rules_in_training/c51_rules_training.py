@@ -69,7 +69,7 @@ class QNetwork(nn.Module):
         q_values = (q_values - min_vals) / (max_vals - min_vals + 1e-8)
         observables = get_observables(x)
         weights = self.get_suggested_action(observables)
-        combined_values = epsilon * weights + (1 - epsilon) * q_values
+        combined_values = weights * q_values
         if action is None:
             action = torch.argmax(combined_values, 1)
 
