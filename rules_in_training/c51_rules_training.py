@@ -229,6 +229,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            group="C51rt"
         )
     writer = SummaryWriter(f"C51rt/runs_rules_training/{run_name}/train")
     writer.add_text(

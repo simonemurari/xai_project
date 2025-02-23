@@ -84,6 +84,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
+            group="C51"
         )
     writer = SummaryWriter(f"C51/runs/{run_name}/train")
     writer.add_text(

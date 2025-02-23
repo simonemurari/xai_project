@@ -28,9 +28,9 @@ In this repository you can find the code to run the C51 algorithm and its variat
 0. **Clone this repository**
 
 1. **Create a Python environment**  
-   Create a virtual environment with Python 3.10.12 and install the packages. For example, using conda:
+   Create a virtual environment with Python 3.10 and install the packages. For example, using conda:
    ```bash
-   conda create -n xai-project python=3.10.12
+   conda create -n xai-project python=3.10
    conda activate xai-project
    pip install -r requirements.txt
    ```

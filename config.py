@@ -15,7 +15,7 @@ class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
     
-    seed: int = 21
+    seed: int = 31241 # 6, 21, 42, 47235, 31241
     """seed of the experiment"""
 
     torch_deterministic: bool = True
