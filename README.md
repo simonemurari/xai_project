@@ -4,13 +4,6 @@ In this repository you can find the code to run the C51 algorithm and its variat
 
 ### Repository Structure
 
-- **C51, C51rexp, C51rt, C51rtv2, C51rtv3**:  
-  In each of these folders you will find the results of a run for each model. Each folder contains:
-  - An image with the model's performance.
-  - A text file with the arguments (`args`) used for that run.
-  - The trained model saved as a `.pt` file.
-  - TensorBoard log directories with training/evaluation logs.
-  
 - **baseC51**:  
   Contains the implementation of the normal C51 algorithm without any additional rules.
 

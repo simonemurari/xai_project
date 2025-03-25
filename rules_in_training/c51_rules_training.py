@@ -50,10 +50,10 @@ class QNetwork(nn.Module):
         self.n = env.single_action_space.n
         self.network = nn.Sequential(
             nn.Linear(np.array(env.single_observation_space.shape).prod(), 128),
-            nn.LeakyReLU(),
+            nn.ReLU(),
             nn.Linear(128, 64),
-            nn.LeakyReLU(),
-            nn.Linear(64, self.n * n_atoms),
+            nn.ReLU(),
+            nn.Linear(64, self.n * n_atoms)
         )
         self.conf_level = 0.8  # confidence level of the rules
         self.unlocked = False  # door is locked at the start
@@ -421,7 +421,7 @@ if __name__ == "__main__":
         print(f"model saved to {model_path}")
         from baseC51.c51_eval import QNetwork as QNetworkEval
         from c51rt_eval import evaluate
-        eval_episodes=10000
+        eval_episodes=100000
         episodic_returns = evaluate(
             model_path,
             make_env,

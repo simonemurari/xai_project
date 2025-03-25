@@ -14,5 +14,17 @@ wheels/
 
 # wandb
 wandb/
-
 plots/
+C51/
+C51rt/
+C51rexp/
+C51rtsum/
+C51rtv2/
+C51rtv2exp/
+C51rtv3/
+DQN/
+config_dqn.py
+dqn.py
+run_3_seeds.sh
+run_5_seeds.sh
+baseC51/c51_grid_search.py

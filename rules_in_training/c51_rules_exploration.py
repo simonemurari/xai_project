@@ -405,7 +405,7 @@ if __name__ == "__main__":
         torch.save(model_data, model_path)
         print(f"model saved to {model_path}")
         from baseC51.c51_eval import QNetwork as QNetworkEval, evaluate
-        eval_episodes=10000
+        eval_episodes=100000
         episodic_returns = evaluate(
             model_path,
             make_env,

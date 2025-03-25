@@ -1,5 +1,6 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/c51/#c51py
 import os
+os.environ['OMP_NUM_THREADS'] = '1'
 import random
 import time
 from datetime import datetime
@@ -13,6 +14,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.multiprocessing as mp
 import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
@@ -20,8 +22,6 @@ from torch.utils.tensorboard import SummaryWriter
 from minigrid.core.constants import IDX_TO_COLOR
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning) 
-
-# print(f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}")
 
 # Rules applied to the C51 algorithm only during training (v3)
 
@@ -113,10 +113,15 @@ class QNetwork(nn.Module):
         self.n = env.single_action_space.n
         self.network = nn.Sequential(
             nn.Linear(np.array(env.single_observation_space.shape).prod(), 256),
-            nn.LeakyReLU(),
+            nn.LayerNorm(256),
+            nn.ReLU(),
             nn.Linear(256, 256),
-            nn.LeakyReLU(),
-            nn.Linear(256, self.n * n_atoms),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Linear(128, self.n * n_atoms),
         )
         self.unlocked = False  # door is locked at the start
 
@@ -149,18 +154,6 @@ class QNetwork(nn.Module):
         
         rule_pmf = s / s.sum()
 
-        # # plot pmf
-        # x = np.linspace(0, 1, self.n_atoms)
-        # plt.figure(figsize=(8, 6))
-        # x = np.linspace(0, 1, 51)
-        # plt.bar(x, rule_pmf, width=(1 / 51) * 0.8)
-        # plt.xlabel("Return Value (Atom)")
-        # plt.ylabel("Probability")
-        # plt.xlim(-0.05, 1.05)
-        # plt.grid(axis='y', alpha=0.75)
-        # plt.savefig(f"plots/rule_pmf_{rule_shift}_{rule_scale}.png")
-        # plt.close()
-        # asfasf
         return rule_pmf
 
 
@@ -299,12 +292,45 @@ def get_observables(raw_obs_batch):
     
     return batch_obs
 
-if __name__ == "__main__":
-    start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+# Set process affinity to specific cores
+def set_process_affinity(process_idx, num_processes):
+    """Pin process to specific cores to avoid contention"""
+    try:
+        import psutil
+        process = psutil.Process()
+        num_cores = psutil.cpu_count(logical=True)
+        
+        # Allocate cores per process
+        cores_per_process = num_cores // num_processes
+        
+        # Calculate core range for this process
+        start_core = process_idx * cores_per_process
+        end_core = start_core + cores_per_process
+        
+        # Create CPU affinity mask
+        cpu_list = list(range(start_core, end_core))
+        process.cpu_affinity(cpu_list)
+        
+        print(f"Process {os.getpid()}: Pinned to cores {cpu_list}")
+    except (ImportError, AttributeError):
+        # If psutil isn't available or doesn't support affinity
+        print(f"Process {os.getpid()}: Couldn't set CPU affinity")
 
-    args = tyro.cli(Args)
-    assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"C51rtv3_{args.env_id}__seed{args.seed}__{start_datetime}"
+
+def train_c51_rules(args, seed, process_idx, num_processes):
+    """Main training function for C51 with rules algorithm"""
+    # Set process affinity to specific cores
+    set_process_affinity(process_idx, num_processes)
+    
+    # Set number of threads for this process
+    torch.set_num_threads(max(1, mp.cpu_count() // num_processes))
+    
+    start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+    # Set the seed for this process
+    args.seed = seed
+    
+    run_name = f"C51rtv3_{args.env_id}__seed{seed}__{start_datetime}"
+    
     if args.track:
         import wandb
         wandb.tensorboard.patch(root_logdir=f"C51rtv3/runs_rules_training/{run_name}/train")
@@ -316,30 +342,31 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rtv3_{args.sigmoid_shift}_{args.sigmoid_scale}_{args.exploration_fraction}_v11"
+            group=f"C51rtv3_{args.sigmoid_shift}_{args.sigmoid_scale}_{args.exploration_fraction}_mp_{args.run_code}",
         )
-    writer = SummaryWriter(f"C51rtv3/runs_rules_training/{run_name}/train")
+    
+    # Only write to TensorBoard periodically to reduce I/O overhead
+    writer = SummaryWriter(f"C51rtv3/runs_rules_training/{run_name}/train", 
+                         max_queue=100, 
+                         flush_secs=30)
+    
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s"
-        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
     episodes_returns = []
 
     # TRY NOT TO MODIFY: seeding
-    print(f'File: {os.path.basename(__file__)}, using seed {args.seed} and exploration fraction {args.exploration_fraction}')
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    print(f'Process {os.getpid()}: File: {os.path.basename(__file__)}, using seed {seed}')
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
     device = args.device
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [
-            make_env(args.env_id, args.seed + i, i, args.capture_video, run_name)
-            for i in range(args.num_envs)
-        ]
+        [make_env(args.env_id, seed, 0, args.capture_video, run_name)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), (
         "only discrete action space is supported"
@@ -366,12 +393,21 @@ if __name__ == "__main__":
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
-    obs, _ = envs.reset(seed=args.seed)
+    obs, _ = envs.reset(seed=seed)
     print_step = args.print_step
-    print(
-        f"Starting training for {args.total_timesteps} timesteps on {args.env_id}, with print_step={print_step}"
-    )
-    for global_step in tqdm(range(args.total_timesteps), colour="green"):
+    print(f"Process {os.getpid()}: Starting training with seed {seed} for {args.total_timesteps} timesteps")
+    
+    # Pre-allocate observation tensor for efficiency
+    obs_tensor = torch.zeros((1, *envs.single_observation_space.shape), dtype=torch.float32, device=device)
+    
+    # Use tqdm with minimal updates to reduce overhead
+    for global_step in tqdm(range(args.total_timesteps), 
+                          desc=f"Seed {seed}", 
+                          position=process_idx,
+                          colour=['blue', 'green', 'red'][process_idx % 3],
+                          miniters=10000,
+                          maxinterval=5):
+        
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(
             args.start_e,
@@ -380,12 +416,13 @@ if __name__ == "__main__":
             global_step,
         )
         if random.random() < epsilon:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions = np.array([envs.single_action_space.sample()])
         else:
-            actions, pmf, _ = q_network.get_action(
-                torch.Tensor(obs).float().to(device),
-            )
-            actions = actions.cpu().numpy()
+            # Reuse pre-allocated tensor
+            obs_tensor.copy_(torch.as_tensor(obs, dtype=torch.float32))
+            with torch.no_grad():
+                actions, _, _ = q_network.get_action(obs_tensor)
+                actions = actions.cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
@@ -394,25 +431,21 @@ if __name__ == "__main__":
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    if global_step >= print_step:
-                        tqdm.write(
-                            f"global_step={global_step}, episodic_return={info['episode']['r'][0]}, episodic_length={info['episode']['l'][0]}, exploration_rate={epsilon:.4f}"
-                        )
-                        print_step += args.print_step
-                    writer.add_scalar(
-                        "episodic_return", info["episode"]["r"], global_step
-                    )
-                    writer.add_scalar(
-                        "episodic_length", info["episode"]["l"], global_step
-                    )
+                    writer.add_scalar("episodic_return", info["episode"]["r"][0], global_step)
+                    writer.add_scalar("episodic_length", info["episode"]["l"][0], global_step)
                     episodes_returns.append(info["episode"]["r"])
+                    if global_step >= print_step:
+                        mean_ep_return = np.mean(episodes_returns[-min(32000, len(episodes_returns)):])
+                        tqdm.write(f"Seed {seed}: global_step={global_step}, ep_return={info['episode']['r'][0]}, mean_return={mean_ep_return:.4f}, len={info['episode']['l'][0]}, eps={epsilon:.4f}")
+                        print_step += args.print_step
                     q_network.unlocked = False
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
         for idx, trunc in enumerate(truncations):
             if trunc:
-                real_next_obs[idx] = infos["final_observation"][idx]
+                if "final_observation" in infos and idx < len(infos.get("final_observation", [])):
+                    real_next_obs[idx] = infos["final_observation"][idx]
         rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
@@ -451,7 +484,6 @@ if __name__ == "__main__":
                 loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
 
                 if global_step % 10000 == 0:
-                    # print(f"global_step={global_step}, loss={loss.item()}")
                     writer.add_scalar("losses/loss", loss.item(), global_step)
                     old_val = (old_pmfs * q_network.atoms).sum(1)
                     writer.add_scalar(
@@ -464,7 +496,7 @@ if __name__ == "__main__":
                     )
 
                 # optimize the model
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)  # More efficient
                 loss.backward()
                 optimizer.step()
 
@@ -472,17 +504,20 @@ if __name__ == "__main__":
             if global_step % args.target_network_frequency == 0:
                 target_network.load_state_dict(q_network.state_dict())
 
+    # Save results
+    plt.figure()
     plt.plot(episodes_returns)
-    plt.title(f'C51rtv3 on {args.env_id} - Return over {args.total_timesteps} timesteps')
+    plt.title(f'C51rtv3 on {args.env_id} - Seed {seed} - Return over {args.total_timesteps} timesteps')
     plt.xlabel("Episode")
     plt.ylabel("Return")
     plt.grid(True)
-    path = f'C51rtv3/{args.env_id}_c51rtv3_{args.total_timesteps}_{start_datetime}'
+    path = f'C51rtv3/{args.env_id}_c51rtv3_{args.total_timesteps}_seed{seed}_{start_datetime}'
     if not os.path.exists("C51rtv3/"):
         os.makedirs("C51rtv3/")
     os.makedirs(path)
-    plt.savefig(f"{path}/{args.env_id}_c51rtv3_{args.total_timesteps}_{start_datetime}.png")
+    plt.savefig(f"{path}/{args.env_id}_c51rtv3_{args.total_timesteps}_seed{seed}_{start_datetime}.png")
     plt.close()
+    
     with open(f"{path}/c51rtv3_args.txt", "w") as f:
         for key, value in vars(args).items():
             if key == "env_id":
@@ -494,40 +529,79 @@ if __name__ == "__main__":
         model_data = {
             "model_weights": q_network.state_dict(),
             "args": vars(args),
+            "seed": seed,
         }
         torch.save(model_data, model_path)
-        print(f"model saved to {model_path}")
-        from baseC51.c51_eval import QNetwork as QNetworkEval
-        from c51rtv3_eval import evaluate
-        eval_episodes=100000
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=eval_episodes,
-            run_name=f"{run_name}-eval",
-            Model=QNetworkEval,
-            device=device,
-            epsilon=0
-        )
-        writer = SummaryWriter(f"C51rtv3/runs_rules_training/{run_name}/eval")
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("episodic_return", episodic_return, idx)
+        print(f"Process {os.getpid()}: Model saved to {model_path}")
+        
+        # Only perform evaluation in the main process or last process
+        if process_idx == num_processes - 1:
+            from baseC51.c51_eval import QNetwork as QNetworkEval
+            from c51rtv3_eval import evaluate
+            eval_episodes=100000
+            episodic_returns = evaluate(
+                model_path,
+                make_env,
+                args.env_id,
+                eval_episodes=eval_episodes,
+                run_name=f"{run_name}-eval",
+                Model=QNetworkEval,
+                device=device,
+                epsilon=0
+            )
+            writer = SummaryWriter(f"C51rtv3/runs_rules_training/{run_name}/eval")
+            for idx, episodic_return in enumerate(episodic_returns):
+                writer.add_scalar("episodic_return", episodic_return, idx)
 
-        plt.plot(episodic_returns)
-        plt.title(f'C51rtv3 Eval on {args.env_id} - Return over {eval_episodes} episodes')
-        plt.xlabel("Episode")
-        plt.ylabel("Return")
-        plt.ylim(0, 1)
-        plt.grid(True)
-        plt.savefig(f"{path}/{args.env_id}_c51rtv3_{eval_episodes}_{start_datetime}_eval.png")
+            plt.plot(episodic_returns)
+            plt.title(f'C51rtv3 Eval on {args.env_id} - Return over {eval_episodes} episodes')
+            plt.xlabel("Episode")
+            plt.ylabel("Return")
+            plt.ylim(0, 1)
+            plt.grid(True)
+            plt.savefig(f"{path}/{args.env_id}_c51rtv3_{eval_episodes}_{start_datetime}_eval.png")
 
-        if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
-
-            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "C51rtv3", f"runs/{run_name}", f"videos/{run_name}-eval")
+            if args.upload_model:
+                from cleanrl_utils.huggingface import push_to_hub
+                repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+                repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
+                push_to_hub(args, episodic_returns, repo_id, "C51rtv3", f"runs/{run_name}", f"videos/{run_name}-eval")
 
     envs.close()
     writer.close()
+    
+    return episodes_returns, path
+
+if __name__ == "__main__":
+    # Set up multiprocessing
+    mp.set_start_method('forkserver', force=True)
+    
+    print(f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}, device = {Args.device}")
+    args = tyro.cli(Args)
+    
+    # Add shared memory lock for GPU access if using CUDA
+    if torch.cuda.is_available() and args.device == "cuda":
+        lock = mp.Lock()
+    else:
+        lock = None
+    
+    # Seeds to use for different processes
+    seeds = [6, 21, 42]
+    num_processes = len(seeds)
+    
+    print(f"Starting C51rtv3 training with {num_processes} processes, seeds: {seeds}")
+    
+    # Start multiple processes for training
+    processes = []
+    for idx, seed in enumerate(seeds):
+        p = mp.Process(target=train_c51_rules, args=(args, seed, idx, num_processes))
+        p.start()
+        # Sleep briefly between process launches to prevent resource contention
+        time.sleep(3)
+        processes.append(p)
+    
+    # Wait for all processes to complete
+    for p in processes:
+        p.join()
+    
+    print("All training processes completed!")

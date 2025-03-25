@@ -75,7 +75,7 @@ if __name__ == "__main__":
     model_path = f"C51rt/{path}/c51rt_model.pt"
     args = tyro.cli(Args)
     run_name = f"C51rtEval_trainedon={path.split('_')[0]}__testedon={args.env_id}__seed={args.seed}__{start_datetime}"
-    eval_episodes = 10000
+    eval_episodes = 100000
     if args.track:
             import wandb
             wandb.tensorboard.patch(root_logdir=f"C51rt/runs_eval/{run_name}/eval")

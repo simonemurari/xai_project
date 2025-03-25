@@ -18,6 +18,8 @@ import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 from minigrid.core.constants import IDX_TO_COLOR
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning) 
 
 # print(f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}")
 
@@ -110,17 +112,22 @@ class QNetwork(nn.Module):
         self.register_buffer("atoms", torch.linspace(v_min, v_max, steps=n_atoms))
         self.n = env.single_action_space.n
         self.network = nn.Sequential(
-            nn.Linear(np.array(env.single_observation_space.shape).prod(), 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 64),
-            nn.LeakyReLU(),
-            nn.Linear(64, self.n * n_atoms)
+            nn.Linear(np.array(env.single_observation_space.shape).prod(), 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Linear(128, self.n * n_atoms),
         )
         self.rule_pmf = self.rule_distribution().view(1, 1, self.n_atoms) # Pre-compute rule PMF
         self.unlocked = False  # door is locked at the start
 
 
-    def get_action(self, x, action=None, global_step=0, total_timesteps=Args.exploration_fraction * Args.total_timesteps):
+    def get_action(self, x, action=None):
         logits = self.network(x)
         # probability mass function for each action
         pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
@@ -147,7 +154,7 @@ class QNetwork(nn.Module):
         s = torch.sigmoid(rule_scale * (self.atoms - rule_shift))
         
         rule_pmf = s / s.sum()
-        rule_pmf = torch.tensor(rule_pmf, dtype=torch.float32)  # Convert back to PyTorch tensor
+        # rule_pmf = torch.clone(rule_pmf).detach()
 
         return rule_pmf
     
@@ -315,7 +322,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rtv2_{args.sigmoid_shift}_{args.sigmoid_scale}",
+            group=f"C51rtv2_{args.sigmoid_shift}_{args.sigmoid_scale}_{args.exploration_fraction}_{args.run_code}",
         )
     writer = SummaryWriter(f"C51rtv2/runs_rules_training/{run_name}/train")
     writer.add_text(
@@ -326,6 +333,7 @@ if __name__ == "__main__":
     episodes_returns = []
 
     # TRY NOT TO MODIFY: seeding
+    print(f'File: {os.path.basename(__file__)}, using seed {args.seed} and exploration fraction {args.exploration_fraction}')
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -382,7 +390,6 @@ if __name__ == "__main__":
         else:
             actions, pmf = q_network.get_action(
                 torch.Tensor(obs).float().to(device),
-                global_step=global_step
             )
             actions = actions.cpu().numpy()
 
@@ -424,7 +431,6 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     _, next_pmfs = target_network.get_action(
                         data.next_observations.float(),
-                        global_step=global_step
                     )
                     next_atoms = data.rewards + args.gamma * target_network.atoms * (1 - data.dones)
                     # projection
@@ -444,7 +450,7 @@ if __name__ == "__main__":
                         target_pmfs[i].index_add_(0, u[i].long(), d_m_u[i])
 
                 _, old_pmfs = q_network.get_action(
-                    data.observations.float(), data.actions.flatten(), global_step=global_step
+                    data.observations.float(), data.actions.flatten()
                 )
                 loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
 
@@ -497,7 +503,7 @@ if __name__ == "__main__":
         print(f"model saved to {model_path}")
         from baseC51.c51_eval import QNetwork as QNetworkEval
         from c51rtv2_eval import evaluate
-        eval_episodes=10000
+        eval_episodes=100000
         episodic_returns = evaluate(
             model_path,
             make_env,

@@ -66,7 +66,7 @@ class QNetwork(nn.Module):
         # alpha = min(0.8, global_step / (total_timesteps))  # Ramps up to 0.8 so at first it's mostly rules and then it's mostly network
         min_vals = torch.amin(q_values, dim=1, keepdim=True)
         max_vals = torch.amax(q_values, dim=1, keepdim=True)
-        q_values = (q_values - min_vals) / (max_vals - min_vals + 1e-8)
+        q_values = (q_values - min_vals)    / (max_vals - min_vals + 1e-8)
         observables = get_observables(x)
         weights = self.get_suggested_action(observables)
         combined_values = weights * epsilon + (1 - epsilon) * q_values
@@ -421,7 +421,7 @@ if __name__ == "__main__":
         print(f"model saved to {model_path}")
         from baseC51.c51_eval import QNetwork as QNetworkEval
         from c51rtSUM_eval import evaluate
-        eval_episodes=10000
+        eval_episodes=100000
         episodic_returns = evaluate(
             model_path,
             make_env,
