@@ -86,16 +86,6 @@ class QNetwork(nn.Module):
             3: (-1, 0),  # Down
         }
 
-        self.action_stats = {
-            "rule_actions_count": 0,
-            "network_actions_count": 0,
-            "rule_actions": [],
-            "network_actions": [],
-            "global_step": [],
-            "rule_influence": [],
-            "epsilon": []
-        }
-
 
     
     def get_action(self, x, action=None, observables=None, epsilon=0.0, global_step=None):
@@ -133,19 +123,6 @@ class QNetwork(nn.Module):
         # Shape the policy by multiplying Q-values with rule distribution
         shaped_q_values = q_values * dist
         final_action = torch.argmax(shaped_q_values, dim=1)
-
-        if torch.argmax(q_values, dim=1) != final_action:
-            self.action_stats["rule_actions_count"] += 1
-
-        else:
-            self.action_stats["network_actions_count"] += 1
-        
-        self.action_stats["rule_actions"].append(self.action_stats["rule_actions_count"])
-        self.action_stats["network_actions"].append(self.action_stats["network_actions_count"])
-        self.action_stats["global_step"].append(global_step)
-        self.action_stats["rule_influence"].append(rule_influence)
-        self.action_stats["epsilon"].append(epsilon)
-
            
         return final_action, pmfs[torch.arange(batch_size), final_action]
 
@@ -313,68 +290,6 @@ class QNetwork(nn.Module):
                 return self.action_map["right"]
             else:
                 return self.action_map["left"]
-            
-    def plot_action_tracking(self):
-        """Plot the rule vs. network action tracking data"""
-        import matplotlib.pyplot as plt
-        
-        # Create a figure with subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-
-        # Prepare data arrays from the tracking data
-        steps = self.action_stats["global_step"]
-        rule_followed = self.action_stats["rule_actions"]
-        network_followed = self.action_stats["network_actions"]
-        rule_influence_values = self.action_stats["rule_influence"]
-        
-        # # Process tracking data into arrays for plotting
-        # for step in range(self.action_stats["global_step"]):
-        #     if step % 1000 == 0:  # Sample at regular intervals
-        #         steps.append(step)
-        #         print(f"Step {step}: rule_influence={self.action_stats['rule_influence']:.2f}")
-                
-        #         # Calculate proportions in the current window
-        #         if current_window:
-        #             rule_followed.append(current_window.count('rule') / len(current_window))
-        #             network_followed.append(current_window.count('network') / len(current_window))
-        #             rule_influence_values.append(self.action_stats["rule_influence"])
-        #             current_window = []
-        
-        # Plot rule influence over time
-        ax1.plot(steps, rule_influence_values, 'b-', label='Rule Influence')
-        ax1.set_xlabel('Training steps')
-        ax1.set_ylabel('Rule influence parameter')
-        ax1.set_title('Rule Influence Parameter Over Training')
-        ax1.legend()
-        ax1.grid(True)
-        
-        # Plot proportion of rule vs. network decisions
-        ax2.plot(steps, rule_followed, 'g-', label='Rule-based actions')
-        ax2.plot(steps, network_followed, 'r-', label='Network-based actions')
-        ax2.set_xlabel('Training steps')
-        ax2.set_ylabel('Proportion of actions')
-        ax2.set_title('Proportion of Actions Determined by Rules vs. Network')
-        ax2.legend()
-        ax2.grid(True)
-        
-        # Add summary statistics
-        plt.figtext(0.5, 0.01, 
-            f"Total actions: {len(self.action_stats['global_step'])}\n" +
-            f"Rule-based actions: {self.action_stats['rule_actions_count']} " +
-            f"({self.action_stats['rule_actions_count']/max(1, len(self.action_stats['global_step'])):.1%})\n" +
-            f"Network-based actions: {self.action_stats['network_actions_count']} " +
-            f"({self.action_stats['network_actions_count']/max(1, len(self.action_stats['global_step'])):.1%})",
-            ha='center', fontsize=12, bbox=dict(facecolor='white', alpha=0.5))
-        
-        plt.tight_layout()
-        plt.subplots_adjust(bottom=0.15)
-        
-        # Save the figure
-        model_path = f"C51rtv2/action_tracking_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        plt.savefig(model_path)
-        plt.close()
-        
-        print(f"Saved action tracking plot to {model_path}")
 
     # Optimize observation processing with NumPy
     def get_observables(self, raw_obs_batch):
@@ -474,7 +389,7 @@ def train_c51(args, seed):
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rtv2_{args.exploration_fraction}_{args.run_code}",
+            group=f"C51rtv2EXPONLY_{args.exploration_fraction}_{args.run_code}",
         )
 
     # Set up TensorBoard writer
@@ -564,16 +479,27 @@ def train_c51(args, seed):
 
         # Action selection
         if random.random() < epsilon:
-            actions = np.array(
-                [envs.single_action_space.sample() for _ in range(envs.num_envs)]
-            )
-        else:
-            # Reuse pre-allocated tensor for efficiency
             obs_tensor.copy_(torch.as_tensor(obs, dtype=torch.float32))
             obs_img = q_network.get_observables(obs_tensor[:, 4:])
+            # Apply rule-based action guidance to the batch
+            rule_action = q_network._apply_rules_batch(obs_img)[0]
+
+            # Rule influence parameter
+            rule_influence = 0.8 * epsilon + 0.2
+
+            dist = torch.ones((q_network.n), device=Args.device) * (1 - rule_influence) / (q_network.n - 1)
+            dist[rule_action] = rule_influence
+            
+            # Normalize distribution
+            dist = dist / dist.sum()
+
+            actions = np.random.choice(
+                q_network.n, p=dist.cpu().numpy(), size=(envs.num_envs,)
+            )
+        else:
             with torch.no_grad():
                 actions, _ = q_network.get_action(
-                    obs_tensor, observables=obs_img, epsilon=epsilon,
+                    obs_tensor, observables=None, epsilon=epsilon,
                     global_step=global_step
                 )
                 actions = actions.cpu().numpy()
@@ -678,8 +604,6 @@ def train_c51(args, seed):
         os.makedirs("C51rtv2/")
     os.makedirs(model_path, exist_ok=True)
 
-    q_network.plot_action_tracking()
-
     if args.save_model:
         model_file = f"{model_path}/c51rtv2_model.pt"
         model_data = {
@@ -718,9 +642,6 @@ def train_c51(args, seed):
 
 
 if __name__ == "__main__":
-    # Configure torch for maximum performance but without multiprocessing
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
 
     # Parse arguments
     args = tyro.cli(Args)

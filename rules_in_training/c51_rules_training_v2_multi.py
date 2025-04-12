@@ -1,31 +1,70 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/c51/#c51py
+# Set OpenMP thread count to 1 to avoid thread contention
 import os
-os.environ['OMP_NUM_THREADS'] = '1'
+
+os.environ["OMP_NUM_THREADS"] = "1"
 import random
 import time
 from datetime import datetime
 import sys
 from pathlib import Path
+import torch.multiprocessing as mp
+
 sys.path.append(str(Path(__file__).parent.parent))
 from config import Args
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.multiprocessing as mp
 import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 from minigrid.core.constants import IDX_TO_COLOR
 import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning) 
 
-# print(f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Rules applied to the C51 algorithm only during training (v2)
+
+# Pre-computed constant arrays for observation processing
+DOOR_STATES = ["open", "closed", "locked"]
+VIEW_SIZE = 7
+MID_POINT = (VIEW_SIZE - 1) // 2
+
+# Pre-computed meshgrid for faster observation processing
+OFFSETS_X, OFFSETS_Y = np.meshgrid(
+    np.arange(VIEW_SIZE) - MID_POINT,
+    np.abs(np.arange(VIEW_SIZE) - (VIEW_SIZE - 1)),
+    indexing="ij",
+)
+
+
+# Set process affinity to specific cores
+def set_process_affinity(process_idx, num_processes):
+    """Pin process to specific cores to avoid contention"""
+    try:
+        import psutil
+
+        process = psutil.Process()
+        num_cores = psutil.cpu_count(logical=True)
+
+        # Allocate cores per process
+        cores_per_process = max(1, num_cores // num_processes)
+
+        # Calculate core range for this process
+        start_core = process_idx * cores_per_process
+        end_core = min(start_core + cores_per_process, num_cores)
+
+        # Create CPU affinity mask
+        cpu_list = list(range(start_core, end_core))
+        process.cpu_affinity(cpu_list)
+
+        print(f"Process {os.getpid()}: Pinned to cores {cpu_list}")
+    except (ImportError, AttributeError):
+        # If psutil isn't available or doesn't support affinity
+        print(f"Process {os.getpid()}: Couldn't set CPU affinity")
+
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -33,9 +72,9 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.make(env_id)
             env = gym.wrappers.FlattenObservation(
-                gym.wrappers.FilterObservation(env, filter_keys=["image"])
+                gym.wrappers.FilterObservation(env, filter_keys=["image", "direction"])
             )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
@@ -44,68 +83,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
     return thunk
 
-def _plot_pmfs(
-    pmfs_rules, pmfs, combined_pmfs, action_index, n_categories, alpha, title_prefix
-):
-    """
-    Plots the PMFs for a rule-based action, a network action, and their combined probabilities.
 
-      Args:
-          pmfs_rules (torch.Tensor): PMF from rules of shape (1, num_actions, num_categories).
-          pmfs (torch.Tensor): PMF from the neural network (1, num_actions, num_categories).
-          combined_pmfs (torch.Tensor): Combined PMF, result of multiplying pmfs and pmfs_rules (1, num_actions, num_categories).
-          action_index (int): The index of the action to plot.
-          n_categories (int): Number of categories (atoms) in the PMFs
-          title_prefix (string): A prefix to add to the titles of the plots
-
-    """
-    # Make sure the input tensors are in CPU
-    pmfs_rules = pmfs_rules.cpu().detach().numpy()
-    pmfs = pmfs.cpu().detach().numpy()
-    combined_pmfs = combined_pmfs.cpu().detach().numpy()
-
-    # Extract the PMFs for the specified action
-    rule_pmf = pmfs_rules[0, action_index]
-    network_pmf = pmfs[0, action_index]
-    combined_pmf = combined_pmfs[0, action_index]
-
-    # Map the range 0 to 51 to 0 to 1
-    x = np.linspace(0, 1, n_categories)
-    # Create subplots
-    _, axs = plt.subplots(1, 3, figsize=(15, 5))
-
-    # Plot the rule-based PMF
-    axs[0].bar(x, rule_pmf, label="Rule PMF", color="skyblue")
-    axs[0].set_title(f"{title_prefix} Rule PMF - Action {action_index} - alpha={alpha}")
-    axs[0].set_xlim(0, 1)
-    axs[0].set_xlabel("Return")
-    axs[0].set_ylabel("Probability")
-    axs[0].legend()
-
-    # Plot the neural network PMF
-    axs[1].bar(x, network_pmf, label="Network PMF", color="salmon")
-    axs[1].set_title(f"{title_prefix} Network PMF - Action {action_index} - alpha={alpha}")
-    axs[1].set_xlim(0, 1)
-    axs[1].set_xlabel("Return")
-    axs[1].set_ylabel("Probability")
-    axs[1].legend()
-
-    # Plot the combined PMF
-    axs[2].bar(x, combined_pmf, label="Combined PMF", color="lightgreen")
-    axs[2].set_title(f"{title_prefix} Combined PMF - Action {action_index} - alpha={alpha}")
-    axs[2].set_xlim(0, 1)
-    axs[2].set_xlabel("Return")
-    axs[2].set_ylabel("Probability")
-    axs[2].legend()
-
-    plt.tight_layout()
-    if not os.path.exists("plots/"):
-        os.makedirs("plots/")
-    plt.savefig(f"plots/{title_prefix}_pmfs_{action_index}_{alpha:.2f}.png")
-    plt.close()
-
-
-# ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
     def __init__(self, env, n_atoms, v_min, v_max):
         super().__init__()
@@ -115,239 +93,321 @@ class QNetwork(nn.Module):
         self.n = env.single_action_space.n
         self.network = nn.Sequential(
             nn.Linear(np.array(env.single_observation_space.shape).prod(), 256),
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.LayerNorm(256),
             nn.ReLU(),
             nn.Linear(256, 128),
-            nn.LayerNorm(128),
             nn.ReLU(),
             nn.Linear(128, self.n * n_atoms),
         )
-        self.rule_pmf = self.rule_distribution().view(1, 1, self.n_atoms) # Pre-compute rule PMF
-        self.unlocked = False  # door is locked at the start
+
+        # Define action mappings (adjust as needed based on your environment)
+        self.action_map = {
+            "left": 0,  # Turn left
+            "right": 1,  # Turn right
+            "forward": 2,  # Move forward
+            "pickup": 3,  # Pickup object
+            "toggle": 5,  # Open door
+        }
+
+        # Precomputed direction offsets for more efficient processing
+        self.direction_offsets = {
+            0: (0, -1),  # Left
+            1: (1, 0),  # Up
+            2: (0, 1),  # Right
+            3: (-1, 0),  # Down
+        }
 
 
-    def get_action(self, x, action=None):
+    
+    def get_action(self, x, action=None, observables=None, epsilon=0.0):
+        """
+        Enhanced action selection that combines C51 distribution with rule-based guidance
+        using proper policy shaping (multiplying distributions)
+        """
+        batch_size = len(x)
+        # print(f"Batch size: {batch_size}, x.shape: {x.shape}")
+
+        # Get distributional Q-values from the network
         logits = self.network(x)
-        # probability mass function for each action
-        pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
-        observables = get_observables(x)
-        rule_mask = self.get_rule_mask(observables).unsqueeze(2)
-        rule_pmfs = rule_mask * self.rule_pmf
-        combined_pmfs = (1 - epsilon) * pmfs + epsilon * rule_pmfs
-        q_values = (combined_pmfs * self.atoms).sum(2)
-        if action is None:
-            action = torch.argmax(q_values, 1)
-        return action, combined_pmfs[torch.arange(len(x)), action]
-    
-    
-    def rule_distribution(self):
-        """
-        Computes a proper distribution over the 51 atoms,
-        increasing slowly from 0 to 1, reaching the highest value only at 1.
-        Returns a PyTorch tensor.
-        """
-        rule_shift = Args.sigmoid_shift
-        rule_scale = Args.sigmoid_scale
+        pmfs = torch.softmax(logits.view(batch_size, self.n, self.n_atoms), dim=2)
+        q_values = (pmfs * self.atoms).sum(2)
 
-        # Compute the standard sigmoid over the atoms
-        s = torch.sigmoid(rule_scale * (self.atoms - rule_shift))
-        
-        rule_pmf = s / s.sum()
-        # rule_pmf = torch.clone(rule_pmf).detach()
+        # If no observables provided, use standard C51 logic
+        if observables is None:
+            if action is None:
+                action = torch.argmax(q_values, 1)
+            return action, pmfs[torch.arange(batch_size), action]
 
-        return rule_pmf
-    
-    def plot_rule_distribution(self):
-        rule_pmf_np = self.rule_pmf.squeeze().numpy()  # Convert to NumPy for plotting
-        plt.figure(figsize=(8, 6))
-        x = np.linspace(0, 1, 51)
-        plt.bar(x, rule_pmf_np, width=(1 / 51) * 0.8)
-        plt.xlabel("Return Value (Atom)")
-        plt.ylabel("Probability")
-        plt.xlim(-0.05, 1.05)
-        plt.grid(axis='y', alpha=0.75)
-        plt.savefig(f"plots/rule_pmf_v2_{Args.sigmoid_shift}_{Args.sigmoid_scale}.png")  # Save the plot
-        plt.close()
+        # Apply rule-based action guidance to the batch
+        rule_action = self._apply_rules_batch(observables)[0]
 
-    def get_rule_mask(self, batch_of_observables):
-        """
-        Optimized vectorized version that processes multiple observations in parallel.
-        """
-        device = Args.device
-        batch_size = len(batch_of_observables)
+        # Rule influence parameter
+        rule_influence = 0.8 * epsilon + 0.2
+
+        dist = torch.ones((self.n), device=x.device) * (1 - rule_influence) / (self.n - 1)
+        dist[rule_action] = rule_influence
         
-        # Pre-allocate tensors
-        rule_mask = torch.zeros(batch_size, self.n, device=device)
-        for batch_idx, observables in enumerate(batch_of_observables):
-            # State tracking with minimal variables
-            carrying_key = None
-            door_state = None
-            has_door_front = False
-            has_key_front = False
-            wall_state = [False, False, False]  # left, right, front
-            goal_data = [0, False]  # x, is_front
-            
-            # Single pass through observations
-            for name, args in observables:
-                match name:
-                    case "door" if args[1:] == [0, 1]:
-                        has_door_front = True
-                        door_color = args[0]
-                    case "key" if args[1:] == [0, 1]:
-                        has_key_front = True
-                    case "carryingKey":
-                        carrying_key = args[0]
-                    case "goal":
-                        goal_data[0] = args[0]
-                        goal_data[1] = args[1] == 1
-                    case "wall":
-                        x, y = args
-                        if y == 0:
-                            if x == -1:
-                                wall_state[0] = True
-                            elif x == 1:
-                                wall_state[1] = True
-                        elif x == 0 and y == 1:
-                            wall_state[2] = True
-                    case state if state in ["open", "closed", "locked"]:
-                        door_state = (state, args[0])
-            
-            # Fast action selection with minimal branching
-            if not carrying_key and has_key_front:
-                rule_mask[batch_idx, 3] = 1
-            
-            # Door interaction
-            if door_state and door_state[0] == "locked" and carrying_key:
-                if has_door_front and carrying_key == door_color:
-                    rule_mask[batch_idx, 5] = 1
-                    self.unlocked = True
-            
-            # Movement logic
-            if goal_data[1] and self.unlocked:
-                rule_mask[batch_idx, 2] = 1
-                self.unlocked = False
-            elif goal_data[0]:
-                if goal_data[0] < 0 and not wall_state[0]:
-                    rule_mask[batch_idx, 0] = 1
-                elif goal_data[0] > 0 and not wall_state[1]:
-                    rule_mask[batch_idx, 1] = 1
-                elif not wall_state[2]:
-                    rule_mask[batch_idx, 2] = 1
+        # Normalize distribution
+        dist = dist / dist.sum()
         
-        return rule_mask
+        # Shape the policy by multiplying Q-values with rule distribution
+        shaped_q_values = q_values * dist
+        final_action = torch.argmax(shaped_q_values, dim=1)
+           
+        return final_action, pmfs[torch.arange(batch_size), final_action]
+
+    def _apply_rules_batch(self, batch_observables):
+        """Apply rules to each environment observation in the batch"""
+        rule_actions = []
+
+        for observables in batch_observables:
+            # Parse observables
+            keys = [o for o in observables if o[0] == "key"]
+            doors = [o for o in observables if o[0] == "door"]
+            goals = [o for o in observables if o[0] == "goal"]
+            walls = [o for o in observables if o[0] == "wall"]
+            carrying_keys = [o for o in observables if o[0] == "carryingKey"]
+            locked_doors = [o for o in observables if o[0] == "locked"]
+            closed_doors = [o for o in observables if o[0] == "closed"]
+
+            # Rule 1: pickup(X) :- key(X), samecolor(X,Y), door(Y), notcarrying
+            if keys and doors and not carrying_keys:
+                for key in keys:
+                    key_color = key[1][0]
+                    matching_doors = [door for door in doors if door[1][0] == key_color]
+                    if matching_doors:
+                        # Check if key is directly in front
+                        key_x, key_y = key[1][1], key[1][2]
+                        if key_x == 0 and key_y == 1:  # Key is directly in front
+                            rule_actions.append(self.action_map["pickup"])
+                            break
+                        else:
+                            # Move towards the key with wall avoidance
+                            action = self._navigate_towards(key_x, key_y, walls)
+                            rule_actions.append(action)
+                            break
+                else:
+                    rule_actions.append(None)  # No applicable key found
+
+            # Rule 2: open(X) :- door(X), locked(X), key(Z), carryingKey(Z), samecolor(X,Z)
+            elif doors and locked_doors and carrying_keys:
+                carrying_key_color = carrying_keys[0][1][0]
+
+                # Check locked doors first (priority)
+                matching_doors_to_open = []
+                if locked_doors:
+                    for door in doors:
+                        door_color = door[1][0]
+                        if door_color == carrying_key_color:
+                            for locked in locked_doors:
+                                if locked[1][0] == door_color:
+                                    matching_doors_to_open.append(door)
+
+                if matching_doors_to_open:
+                    door = matching_doors_to_open[0]
+                    door_x, door_y = door[1][1], door[1][2]
+                    if door_x == 0 and door_y == 1:  # Door is directly in front
+                        rule_actions.append(self.action_map["toggle"])
+                    else:
+                        # Move towards the door with wall avoidance
+                        action = self._navigate_towards(door_x, door_y, walls)
+                        rule_actions.append(action)
+                else:
+                    rule_actions.append(None)
+
+            # Rule 3: goto :- goal(X), unlocked
+            elif goals:
+                goal = goals[0]
+                goal_x, goal_y = goal[1][0], goal[1][1]
+
+                # Check if there's a clear path to the goal (no closed/locked doors in the way)
+                blocked_by_door = False
+
+                # Simple check: if we see a closed/locked door that's between us and the goal
+                direction_to_goal = (
+                    1 if goal_x > 0 else (-1 if goal_x < 0 else 0),
+                    1 if goal_y > 0 else (-1 if goal_y < 0 else 0),
+                )
+
+                # Only consider a door blocking if it's in the same general direction as the goal
+                for door in doors:
+                    door_x, door_y = door[1][1], door[1][2]
+                    door_direction = (
+                        1 if door_x > 0 else (-1 if door_x < 0 else 0),
+                        1 if door_y > 0 else (-1 if door_y < 0 else 0),
+                    )
+
+                    door_color = door[1][0]
+                    # Check if the door is in the same general direction as the goal
+                    same_direction = (
+                        direction_to_goal[0] == door_direction[0]
+                        and direction_to_goal[1] == door_direction[1]
+                    )
+
+                    # Check if door is closer than the goal
+                    door_distance = abs(door_x) + abs(door_y)
+                    goal_distance = abs(goal_x) + abs(goal_y)
+                    door_is_closer = door_distance < goal_distance
+
+                    # Check if the door is closed or locked
+                    door_is_closed = any(cd[1][0] == door_color for cd in closed_doors)
+                    door_is_locked = any(ld[1][0] == door_color for ld in locked_doors)
+
+                    if (
+                        same_direction
+                        and door_is_closer
+                        and (door_is_closed or door_is_locked)
+                    ):
+                        blocked_by_door = True
+                        break
+
+                if not blocked_by_door:
+                    if goal_x == 0 and goal_y == 1:  # Goal is directly in front
+                        rule_actions.append(self.action_map["forward"])
+                    else:
+                        # Move towards the goal with wall avoidance
+                        action = self._navigate_towards(goal_x, goal_y, walls)
+                        rule_actions.append(action)
+                else:
+                    rule_actions.append(None)
+            else:
+                rule_actions.append(None)  # No applicable rule
+
+        return rule_actions
+
+    def _navigate_towards(self, target_x, target_y, walls=None):
+        """
+        Improved navigation helper that avoids walls when moving towards a target
+
+        Args:
+            target_x: Relative x-coordinate of the target
+            target_y: Relative y-coordinate of the target
+            walls: List of wall observations with their positions
+        """
+        # If no walls, use simpler navigation
+        if not walls:
+            if target_y > 0:  # Target is in front
+                return self.action_map["forward"]
+            elif target_x < 0:  # Target is to the left
+                return self.action_map["left"]
+            elif target_x > 0:  # Target is to the right
+                return self.action_map["right"]
+            else:  # Target is behind, turn around
+                return self.action_map["right"]
+
+        # Check if there's a wall directly in front
+        wall_in_front = any(w[1][0] == 0 and w[1][1] == 1 for w in walls)
+
+        # Determine the relative position of the target
+        if target_y > 0:  # Target is in front
+            if not wall_in_front:
+                return self.action_map["forward"]
+            else:
+                # Wall blocking forward movement, turn to find another path
+                return (
+                    self.action_map["left"]
+                    if target_x <= 0
+                    else self.action_map["right"]
+                )
+        elif target_x < 0:  # Target is to the left
+            return self.action_map["left"]
+        elif target_x > 0:  # Target is to the right
+            return self.action_map["right"]
+        else:  # Target is behind
+            # Choose a turn direction based on wall presence
+            wall_to_left = any(w[1][0] == -1 and w[1][1] == 0 for w in walls)
+            if wall_to_left:
+                return self.action_map["right"]
+            else:
+                return self.action_map["left"]
+
+    # Optimize observation processing with NumPy
+    def get_observables(self, raw_obs_batch):
+        """
+        Highly optimized version of get_observables that processes entire batch at once
+        """
+        batch_size = raw_obs_batch.shape[0]
+
+        # Convert to NumPy once if needed
+        if isinstance(raw_obs_batch, torch.Tensor):
+            raw_obs_batch = raw_obs_batch.cpu().numpy()
+
+        # Reshape efficiently with pre-computed shape
+        try:
+            img_batch = raw_obs_batch.reshape(batch_size, VIEW_SIZE, VIEW_SIZE, 3)
+        except ValueError:
+            # Handle case where dimensions don't match by taking only the image part
+            img_batch = raw_obs_batch[:, : VIEW_SIZE * VIEW_SIZE * 3].reshape(
+                batch_size, VIEW_SIZE, VIEW_SIZE, 3
+            )
+
+        # Process batch items in parallel
+        batch_obs = []
+
+        # Process each batch item with minimal Python overhead
+        for img in img_batch:
+            obs = []
+            item_first = img[..., 0]
+            item_second = img[..., 1]
+            item_third = img[..., 2]
+
+            # Find all object positions efficiently with NumPy
+            key_positions = np.where(item_first == 5)
+            door_positions = np.where(item_first == 4)
+            goal_positions = np.where(item_first == 8)
+            wall_positions = np.where(item_first == 2)
+
+            # Vectorized processing for keys
+            for k_i, k_j in zip(*key_positions):
+                color = IDX_TO_COLOR.get(item_second[k_i, k_j])
+                obs.append(("key", [color, OFFSETS_X[k_i, k_j], OFFSETS_Y[k_i, k_j]]))
+                if k_i == MID_POINT and k_j == VIEW_SIZE - 1:
+                    obs.append(("carryingKey", [color]))
+
+            # Vectorized processing for doors
+            for d_i, d_j in zip(*door_positions):
+                color = IDX_TO_COLOR.get(item_second[d_i, d_j])
+                obs.append(("door", [color, OFFSETS_X[d_i, d_j], OFFSETS_Y[d_i, d_j]]))
+                # Get the door state from the third channel
+                door_state_idx = int(item_third[d_i, d_j])
+                obs.append((DOOR_STATES[door_state_idx], [color]))
+
+            # Vectorized processing for goals and walls
+            for g_i, g_j in zip(*goal_positions):
+                obs.append(("goal", [OFFSETS_X[g_i, g_j], OFFSETS_Y[g_i, g_j]]))
+
+            for w_i, w_j in zip(*wall_positions):
+                obs.append(("wall", [OFFSETS_X[w_i, w_j], OFFSETS_Y[w_i, w_j]]))
+
+            batch_obs.append(obs)
+
+        return batch_obs
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
-def get_observables(raw_obs_batch):
-    """
-    Vectorized version of get_observables that processes entire batch at once
-    Args:
-        raw_obs_batch: shape (batch_size, H*W*C) or (batch_size, H, W, C)
-    Returns:
-        List of observation lists for each item in batch
-    """
-    DOOR_STATES = ["open", "closed", "locked"]
-    view_size = 7
-    mid = (view_size - 1) // 2
-    batch_size = raw_obs_batch.shape[0]
-    
-    if isinstance(raw_obs_batch, torch.Tensor):
-        raw_obs_batch = raw_obs_batch.cpu().numpy()
-    
-    # Reshape to (batch_size, H, W, C)
-    img_batch = raw_obs_batch.reshape(batch_size, view_size, view_size, 3)
-    
-    # Pre-compute offsets once
-    i, j = np.meshgrid(np.arange(view_size), np.arange(view_size), indexing='ij')
-    offset_x = i - mid
-    offset_y = np.abs(j - (view_size - 1))
-    
-    batch_obs = []
-    
-    # Process each batch item
-    for img in img_batch:
-        obs = []
-        item_first = img[..., 0]
-        item_second = img[..., 1]
-        
-        # Find all object positions at once
-        key_positions = np.where(item_first == 5)
-        door_positions = np.where(item_first == 4)
-        goal_positions = np.where(item_first == 8)
-        wall_positions = np.where(item_first == 2)
-        
-        # Process keys
-        for k_i, k_j in zip(*key_positions):
-            color = IDX_TO_COLOR.get(item_second[k_i, k_j])
-            obs.append(("key", [color, offset_x[k_i, k_j], offset_y[k_i, k_j]]))
-            if k_i == mid and k_j == view_size - 1:
-                obs.append(("carryingKey", [color]))
-        
-        # Process doors
-        for d_i, d_j in zip(*door_positions):
-            color = IDX_TO_COLOR.get(item_second[d_i, d_j])
-            obs.append(("door", [color, offset_x[d_i, d_j], offset_y[d_i, d_j]]))
-            obs.append((DOOR_STATES[2], [color]))
-        
-        # Process goals
-        for g_i, g_j in zip(*goal_positions):
-            obs.append(("goal", [offset_x[g_i, g_j], offset_y[g_i, g_j]]))
-        
-        # Process walls
-        for w_i, w_j in zip(*wall_positions):
-            obs.append(("wall", [offset_x[w_i, w_j], offset_y[w_i, w_j]]))
-            
-        batch_obs.append(obs)
-    
-    return batch_obs
 
-# Set process affinity to specific cores
-def set_process_affinity(process_idx, num_processes):
-    """Pin process to specific cores to avoid contention"""
-    try:
-        import psutil
-        process = psutil.Process()
-        num_cores = psutil.cpu_count(logical=True)
-        
-        # Allocate cores per process
-        cores_per_process = num_cores // num_processes
-        
-        # Calculate core range for this process
-        start_core = process_idx * cores_per_process
-        end_core = start_core + cores_per_process
-        
-        # Create CPU affinity mask
-        cpu_list = list(range(start_core, end_core))
-        process.cpu_affinity(cpu_list)
-        
-        print(f"Process {os.getpid()}: Pinned to cores {cpu_list}")
-    except (ImportError, AttributeError):
-        # If psutil isn't available or doesn't support affinity
-        print(f"Process {os.getpid()}: Couldn't set CPU affinity")
-
-def train_c51_rules(args, seed, process_idx, num_processes):
-    """Main training function for C51 with rules algorithm"""
+def train_c51(args, seed, process_idx, num_processes):
+    """
+    Optimized training function for each process
+    """
     # Set process affinity to specific cores
     set_process_affinity(process_idx, num_processes)
-    
-    # Set number of threads for this process
-    torch.set_num_threads(max(1, mp.cpu_count() // num_processes))
-    
-    start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
-    # Set the seed for this process
-    args.seed = seed
 
-    run_name = f"C51rtv2_{args.env_id}__seed{seed}__{start_datetime}"
-    
+    # Limit the number of threads for this process
+    torch.set_num_threads(max(1, mp.cpu_count() // num_processes))
+
+    start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+    run_name = f"C51rtv2_multi_{args.env_id}__seed{seed}__{start_datetime}"
+
+    # Setup logging only if tracking is enabled
     if args.track:
         import wandb
-        wandb.tensorboard.patch(root_logdir=f"C51rtv2/runs_rules_training/{run_name}/train")
+
+        wandb.tensorboard.patch(
+            root_logdir=f"C51rtv2/runs_rules_training/{run_name}/train"
+        )
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -356,22 +416,26 @@ def train_c51_rules(args, seed, process_idx, num_processes):
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rtv2_{args.sigmoid_shift}_{args.sigmoid_scale}_{args.exploration_fraction}_mp_{args.run_code}",
+            group=f"C51rtv2_mp_{args.exploration_fraction}_{args.run_code}",
         )
-    
-    # Only write to TensorBoard periodically to reduce I/O overhead
-    writer = SummaryWriter(f"C51rtv2/runs_rules_training/{run_name}/train", 
-                         max_queue=100, 
-                         flush_secs=30)
-    
+
+    # Reduce TensorBoard write frequency
+    writer = SummaryWriter(
+        f"C51rtv2/runs_rules_training/{run_name}/train", max_queue=100, flush_secs=30
+    )
+
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
     episodes_returns = []
+    episodes_lengths = []
 
     # TRY NOT TO MODIFY: seeding
-    print(f'Process {os.getpid()}: File: {os.path.basename(__file__)}, using seed {seed}')
+    print(
+        f"Process {os.getpid()}: File: {os.path.basename(__file__)}, using seed {seed}, cores per process: {mp.cpu_count() // num_processes}"
+    )
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -380,7 +444,16 @@ def train_c51_rules(args, seed, process_idx, num_processes):
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, seed, 0, args.capture_video, run_name)]
+        [
+            make_env(
+                args.env_id,
+                seed,
+                i,
+                args.capture_video and process_idx == 0 and i == 0,
+                run_name,
+            )
+            for i in range(args.num_envs)
+        ]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), (
         "only discrete action space is supported"
@@ -409,215 +482,207 @@ def train_c51_rules(args, seed, process_idx, num_processes):
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=seed)
     print_step = args.print_step
-    print(f"Process {os.getpid()}: Starting training with seed {seed} for {args.total_timesteps} timesteps")
-    
+    print(f"Process {os.getpid()}: Starting training with seed {seed}, device {device}")
+
     # Pre-allocate observation tensor for efficiency
-    obs_tensor = torch.zeros((1, *envs.single_observation_space.shape), dtype=torch.float32, device=device)
-    
-    # Use tqdm with minimal updates to reduce overhead
-    for global_step in tqdm(range(args.total_timesteps), 
-                          desc=f"Seed {seed}", 
-                          position=process_idx,
-                          colour=['blue', 'green', 'red'][process_idx % 3],
-                          miniters=10000,
-                          maxinterval=5):
-                            
+    obs_tensor = torch.zeros(
+        (1, *envs.single_observation_space.shape), dtype=torch.float32, device=device
+    )
+
+    # Create tqdm progress bar with minimal updates
+    for global_step in tqdm(
+        range(args.total_timesteps),
+        desc=f"Seed {seed}",
+        position=process_idx,
+        colour=["blue", "green", "red"][process_idx % 3],
+        miniters=10000,
+        maxinterval=20,
+    ):
         # ALGO LOGIC: put action logic here
-        global epsilon  # Make epsilon available to QNetwork.get_action
         epsilon = linear_schedule(
             args.start_e,
             args.end_e,
             args.exploration_fraction * args.total_timesteps,
             global_step,
         )
+
+        # Action selection
         if random.random() < epsilon:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions = np.array(
+                [envs.single_action_space.sample() for _ in range(envs.num_envs)]
+            )
         else:
-            # Reuse pre-allocated tensor
+            # Reuse pre-allocated tensor for efficiency
             obs_tensor.copy_(torch.as_tensor(obs, dtype=torch.float32))
+            # print(f"obs_tensor shape: {obs_tensor.shape}")
+            obs_img = q_network.get_observables(obs_tensor[:, 4:])
+            # print(f"obs_img shape: {obs_img}")
             with torch.no_grad():
-                actions, pmf = q_network.get_action(obs_tensor)
+                actions, _ = q_network.get_action(
+                    obs_tensor, observables=obs_img, epsilon=epsilon
+                )
                 actions = actions.cpu().numpy()
 
-        # TRY NOT TO MODIFY: execute the game and log data.
+        # Execute the game and log data
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        # Record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    writer.add_scalar("episodic_return", info["episode"]["r"][0], global_step)
-                    writer.add_scalar("episodic_length", info["episode"]["l"][0], global_step)
-                    episodes_returns.append(info["episode"]["r"])
+                    writer.add_scalar(
+                        "episodic_return", float(info["episode"]["r"][0]), global_step
+                    )
+                    writer.add_scalar(
+                        "episodic_length", float(info["episode"]["l"][0]), global_step
+                    )
+                    episodes_returns.append(float(info["episode"]["r"][0]))
+                    episodes_lengths.append(float(info["episode"]["l"][0]))
                     if global_step >= print_step:
-                        mean_ep_return = np.mean(episodes_returns[-32000:])
-                        tqdm.write(f"seed = {seed}: global_step={global_step}, episodic_return={info['episode']['r'][0]}, mean={mean_ep_return:.4f}, length={info['episode']['l'][0]}, eps={epsilon:.4f}")
+                        mean_return = np.mean(episodes_returns[-args.print_step :])
+                        mean_len = np.mean(episodes_lengths[-args.print_step :])
+                        tqdm.write(
+                            f"seed: {seed}, step={global_step}, mean_return={mean_return:.2f}, mean_len={mean_len:.2f}, epsilon={epsilon:.2f}, \
+                             rule_influence={0.8 * epsilon + 0.2}"
+                        )
                         print_step += args.print_step
-                    q_network.unlocked = False
 
-        # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
+        # Save data to replay buffer; handle final_observation
         real_next_obs = next_obs.copy()
         for idx, trunc in enumerate(truncations):
             if trunc:
-                if "final_observation" in infos and idx < len(infos.get("final_observation", [])):
-                    real_next_obs[idx] = infos["final_observation"][idx]
+                real_next_obs[idx] = infos["final_observation"][idx]
         rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
 
-        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
+        # Update current observation
         obs = next_obs
 
-        # ALGO LOGIC: training.
+        # ALGO LOGIC: training
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
+                    # Target network processing
                     _, next_pmfs = target_network.get_action(
-                        data.next_observations.float(),
+                        data.next_observations.float(), observables=None
                     )
-                    next_atoms = data.rewards + args.gamma * target_network.atoms * (1 - data.dones)
-                    # projection
+                    next_atoms = data.rewards + args.gamma * target_network.atoms * (
+                        1 - data.dones
+                    )
+
+                    # Projection with optimized tensor operations
                     delta_z = target_network.atoms[1] - target_network.atoms[0]
                     tz = next_atoms.clamp(args.v_min, args.v_max)
-
                     b = (tz - args.v_min) / delta_z
                     l = b.floor().clamp(0, args.n_atoms - 1)
                     u = b.ceil().clamp(0, args.n_atoms - 1)
-                    # (l == u).float() handles the case where bj is exactly an integer
-                    # example bj = 1, then the upper ceiling should be uj= 2, and lj= 1
+
+                    # Optimized distribution projection
                     d_m_l = (u + (l == u).float() - b) * next_pmfs
                     d_m_u = (b - l) * next_pmfs
                     target_pmfs = torch.zeros_like(next_pmfs)
+
+                    # Vectorized index_add for better performance
                     for i in range(target_pmfs.size(0)):
                         target_pmfs[i].index_add_(0, l[i].long(), d_m_l[i])
                         target_pmfs[i].index_add_(0, u[i].long(), d_m_u[i])
 
+                # Current network processing
                 _, old_pmfs = q_network.get_action(
-                    data.observations.float(), data.actions.flatten()
+                    data.observations.float(), data.actions.flatten(), observables=None
                 )
-                loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
+                loss = (
+                    -(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(
+                        -1
+                    )
+                ).mean()
 
+                # Log less frequently for better performance
                 if global_step % 10000 == 0:
                     writer.add_scalar("losses/loss", loss.item(), global_step)
-                    old_val = (old_pmfs * q_network.atoms).sum(1)
-                    writer.add_scalar(
-                        "losses/q_values", old_val.mean().item(), global_step
-                    )
                     writer.add_scalar(
                         "SPS",
                         int(global_step / (time.time() - start_time)),
                         global_step,
                     )
 
-                # optimize the model
-                optimizer.zero_grad(set_to_none=True)  # More efficient
+                # Optimize more efficiently
+                optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
                 loss.backward()
                 optimizer.step()
 
-            # update target network
-            if global_step % args.target_network_frequency == 0:
-                target_network.load_state_dict(q_network.state_dict())
+                # Update target network when needed
+                if global_step % args.target_network_frequency == 0:
+                    target_network.load_state_dict(q_network.state_dict())
 
     # Save results
-    plt.figure()
-    plt.plot(episodes_returns)
-    plt.title(f'C51rtv2 on {args.env_id} - Seed {seed} - Return over {args.total_timesteps} timesteps')
-    plt.xlabel("Episode")
-    plt.ylabel("Return")
-    plt.grid(True)
-    path = f'C51rtv2/{args.env_id}_c51rtv2_{args.total_timesteps}_seed{seed}_{start_datetime}'
+    model_path = f"C51rtv2/{args.env_id}_c51rtv2_{args.total_timesteps}_seed{seed}_{start_datetime}"
     if not os.path.exists("C51rtv2/"):
         os.makedirs("C51rtv2/")
-    os.makedirs(path)
-    plt.savefig(f"{path}/{args.env_id}_c51rtv2_{args.total_timesteps}_seed{seed}_{start_datetime}.png")
-    plt.close()
-    
-    with open(f"{path}/c51rtv2_args.txt", "w") as f:
-        for key, value in vars(args).items():
-            if key == "env_id":
-                f.write("# C51 Algorithm specific arguments\n")
-            f.write(f"{key}: {value}\n")
+    os.makedirs(model_path, exist_ok=True)
 
     if args.save_model:
-        model_path = f"{path}/c51rtv2_model.pt"
+        model_file = f"{model_path}/c51rtv2_model.pt"
         model_data = {
             "model_weights": q_network.state_dict(),
             "args": vars(args),
-            "seed": seed,
         }
-        torch.save(model_data, model_path)
-        print(f"Process {os.getpid()}: Model saved to {model_path}")
-        
-        # Only perform evaluation in the main process or last process
-        if process_idx == num_processes - 1:
+        torch.save(model_data, model_file)
+        print(f"Process {os.getpid()}: model saved to {model_file}")
+
+        # Only do evaluation on the first process
+        if process_idx == 0 and args.evaluate:
             from baseC51.c51_eval import QNetwork as QNetworkEval
             from c51rtv2_eval import evaluate
-            eval_episodes=100000
+
+            eval_episodes = 100
             episodic_returns = evaluate(
-                model_path,
+                model_file,
                 make_env,
                 args.env_id,
                 eval_episodes=eval_episodes,
                 run_name=f"{run_name}-eval",
                 Model=QNetworkEval,
                 device=device,
-                epsilon=0
+                epsilon=0,
             )
+
             writer = SummaryWriter(f"C51rtv2/runs_rules_training/{run_name}/eval")
             for idx, episodic_return in enumerate(episodic_returns):
                 writer.add_scalar("episodic_return", episodic_return, idx)
 
-            plt.plot(episodic_returns)
-            plt.title(f'C51rtv2 Eval on {args.env_id} - Return over {eval_episodes} episodes')
-            plt.xlabel("Episode")
-            plt.ylabel("Return")
-            plt.ylim(0, 1)
-            plt.grid(True)
-            plt.savefig(f"{path}/{args.env_id}_c51rtv2_{eval_episodes}_{start_datetime}_eval.png")
-
-            if args.upload_model:
-                from cleanrl_utils.huggingface import push_to_hub
-                repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-                repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-                push_to_hub(args, episodic_returns, repo_id, "C51rtv2", f"runs/{run_name}", f"videos/{run_name}-eval")
-
     envs.close()
     writer.close()
-    
-    return episodes_returns, path
+
 
 if __name__ == "__main__":
-    # Set up multiprocessing
-    if sys.platform != 'win32':
-        mp.set_start_method('forkserver', force=True)
-    else:
-        mp.set_start_method('spawn', force=True)
-    
-    print(f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}, device = {Args.device}")
+    # Configure torch for maximum performance
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+
+    # Use forkserver for better compatibility
+    mp.set_start_method("forkserver", force=True)
+
+    # Parse arguments
     args = tyro.cli(Args)
-    
-    # Add shared memory lock for GPU access if using CUDA
-    if torch.cuda.is_available() and args.device == "cuda":
-        lock = mp.Lock()
-    else:
-        lock = None
-    
+
     # Seeds to use for different processes
-    seeds = [6, 21, 42]
+    seeds = [6, 21, 42]  # 47235, 31241
     num_processes = len(seeds)
-    
-    print(f"Starting C51rtv2 training with {num_processes} processes, seeds: {seeds}")
-    
-    # Start multiple processes for training
+
+    print(f"Starting C51 Rules Training with {num_processes} processes, seeds: {seeds}")
+
+    # Start multiple processes with staggered launches
     processes = []
     for idx, seed in enumerate(seeds):
-        p = mp.Process(target=train_c51_rules, args=(args, seed, idx, num_processes))
+        p = mp.Process(target=train_c51, args=(args, seed, idx, num_processes))
         p.start()
-        # Sleep briefly between process launches to prevent resource contention
+        # Sleep between process launches to prevent resource contention
         time.sleep(3)
         processes.append(p)
-    
+
     # Wait for all processes to complete
     for p in processes:
         p.join()
-    
+
     print("All training processes completed!")

@@ -1,3 +1,4 @@
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/c51/#c51py
 import os
 import random
 import time
@@ -17,15 +18,10 @@ import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 from minigrid.core.constants import IDX_TO_COLOR
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# Rules applied to the C51 algorithm only during training (SUM)
+# print(f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}")
 
-# Pre-computed constant arrays for observation processing
-DOOR_STATES = ["open", "closed", "locked"]
-VIEW_SIZE = 7
-MID_POINT = (VIEW_SIZE - 1) // 2
+# Rules applied to the C51 algorithm only during training
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -59,7 +55,6 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(128, self.n * n_atoms),
         )
-                
         self.conf_level = 0.8  # confidence level of the rules
 
     def get_action(self, x, action=None, epsilon=None):
@@ -67,23 +62,17 @@ class QNetwork(nn.Module):
         # probability mass function for each action
         pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
         q_values = (pmfs * self.atoms).sum(2)
+        # alpha = min(0.8, global_step / (total_timesteps))  # Ramps up to 0.8 so at first it's mostly rules and then it's mostly network
         if epsilon is not None:
-            # Normalize Q-values to [0,1] for fair blending with rules
             min_vals = torch.amin(q_values, dim=1, keepdim=True)
             max_vals = torch.amax(q_values, dim=1, keepdim=True)
-            q_values = (q_values - min_vals) / (max_vals - min_vals + 1e-8)
-            
-            # Process image part only for rules
-            x_img = x[:, 4:]
-            observables = get_observables(x_img)
+            q_values = (q_values - min_vals)    / (max_vals - min_vals + 1e-8)
+            x = x[:, 4:]
+            observables = get_observables(x)
             weights = self.get_suggested_action(observables)
-            combined_values = weights * q_values
-            
-            if action is None:
-                action = torch.argmax(combined_values, 1)
-        else:
-            if action is None:
-                action = torch.argmax(q_values, 1)
+            combined_values = weights * epsilon + (1 - epsilon) * q_values
+        if action is None:
+            action = torch.argmax(combined_values, 1)
 
         return action, pmfs[torch.arange(len(x)), action]
 
@@ -92,7 +81,7 @@ class QNetwork(nn.Module):
         Optimized vectorized version that handles multiple doors and goals properly.
         This version allows movement toward the goal even when doors aren't visible.
         """
-        device = self.atoms.device
+        device = Args.device
         batch_size = len(batch_of_observables)
         
         # Pre-allocate tensors
@@ -152,14 +141,14 @@ class QNetwork(nn.Module):
                 weights[batch_idx, 3] = self.conf_level
             
             # Rule 2: Open/unlock door if locked and have matching key
-            elif has_door_front and door_front_color in visible_doors:
+            if has_door_front and door_front_color in visible_doors:
                 door_info = visible_doors[door_front_color]
                 if door_info.get("state") == "locked" and carrying_key:
                     if carrying_key == door_front_color:
                         weights[batch_idx, 5] = self.conf_level
             
             # Rule 3: Navigate toward goal when visible, unless path is blocked
-            elif goal_data[1] and not path_blocked and not wall_state[2]:
+            if goal_data[1] and not path_blocked and not wall_state[2]:
                 # Goal is directly in front and path is clear - move forward
                 weights[batch_idx, 2] = self.conf_level
             elif goal_data[0] and not path_blocked:
@@ -189,6 +178,7 @@ def get_observables(raw_obs_batch):
     Returns:
         List of observation lists for each item in batch
     """
+    DOOR_STATES = ["open", "closed", "locked"]
     view_size = 7
     mid = (view_size - 1) // 2
     batch_size = raw_obs_batch.shape[0]
@@ -244,30 +234,15 @@ def get_observables(raw_obs_batch):
     
     return batch_obs
 
-def train_c51(args, seed):
-    """
-    Single-process training function for C51 algorithm with rules
-    """
-    # Set random seed
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-    torch.backends.cudnn.benchmark = False
-    
-    # Create a timestamped run name
+if __name__ == "__main__":
     start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
-    run_name = f"C51rtPRODUCT_{args.env_id}_seed{seed}_{start_datetime}"
-    
-    # Set up device (CPU/GPU)
-    device = args.device
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-    
-    # Setup logging
+
+    args = tyro.cli(Args)
+    assert args.num_envs == 1, "vectorized envs are not supported at the moment"
+    run_name = f"C51rtSUM_{args.env_id}__seed{args.seed}__{start_datetime}"
     if args.track:
         import wandb
-        wandb.tensorboard.patch(root_logdir=f"C51rtPRODUCT/runs_rules_training/{run_name}/train")
+        wandb.tensorboard.patch(root_logdir=f"C51rtSUM/runs_rules_training/{run_name}/train")
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -276,36 +251,45 @@ def train_c51(args, seed):
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rtPRODUCT_{args.run_code}",
+            group="C51rtSUM"
         )
-    
-    writer = SummaryWriter(f"C51rtPRODUCT/runs_rules_training/{run_name}/train",
-                         max_queue=100,
-                         flush_secs=30)
-                         
+    writer = SummaryWriter(f"C51rtSUM/runs_rules_training/{run_name}/train")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
         % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
     episodes_returns = []
-    episodes_lengths = []
-    
-    print(f'Using seed {seed}, device {device}')
 
-    # Create environment
+    # TRY NOT TO MODIFY: seeding
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+    device = args.device
+
+    # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, seed, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        [
+            make_env(args.env_id, args.seed + i, i, args.capture_video, run_name)
+            for i in range(args.num_envs)
+        ]
     )
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "Only discrete action space is supported"
+    assert isinstance(envs.single_action_space, gym.spaces.Discrete), (
+        "only discrete action space is supported"
+    )
 
-    # Initialize networks
-    q_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
-    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size)
-    target_network = QNetwork(envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max).to(device)
+    q_network = QNetwork(
+        envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max
+    ).to(device)
+    optimizer = optim.Adam(
+        q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size
+    )
+    target_network = QNetwork(
+        envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max
+    ).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
-    # Create replay buffer
     rb = ReplayBuffer(
         args.buffer_size,
         envs.single_observation_space,
@@ -315,182 +299,178 @@ def train_c51(args, seed):
     )
     start_time = time.time()
 
-    # Start the environment
-    obs, _ = envs.reset(seed=seed)
+    # TRY NOT TO MODIFY: start the game
+    obs, _ = envs.reset(seed=args.seed)
     print_step = args.print_step
-    print(f"Starting training with seed={seed}, device={device}")
-    
-    # Pre-allocate observation tensor
-    obs_tensor = torch.zeros((1, *envs.single_observation_space.shape), dtype=torch.float32, device=device)
-    
-    # Training loop
-    progress_bar = tqdm(
-        range(args.total_timesteps),
-        desc="Training",
-        colour='blue',
-        miniters=5000,
-        maxinterval=10
+    print(
+        f"Starting training for {args.total_timesteps} timesteps on {args.env_id}, with print_step={print_step}"
     )
-    
-    for global_step in progress_bar:
-        # Action selection with epsilon-greedy
+    for global_step in tqdm(range(args.total_timesteps), colour="green"):
+        # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(
             args.start_e,
             args.end_e,
             args.exploration_fraction * args.total_timesteps,
             global_step,
         )
-        
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            obs_tensor.copy_(torch.as_tensor(obs, dtype=torch.float32))
-            with torch.no_grad():
-                actions, _ = q_network.get_action(obs_tensor, epsilon=epsilon)
-                actions = actions.cpu().numpy()
+            actions, pmf = q_network.get_action(
+                torch.Tensor(obs).float().to(device),
+                epsilon=epsilon,
+            )
+            actions = actions.cpu().numpy()
 
-        # Environment step
+        # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
-        # Log episode statistics
+        # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    writer.add_scalar(
-                        "episodic_return", float(info["episode"]["r"][0]), global_step
-                    )
-                    writer.add_scalar(
-                        "episodic_length", float(info["episode"]["l"][0]), global_step
-                    )
-                    episodes_returns.append(float(info["episode"]["r"][0]))
-                    episodes_lengths.append(float(info["episode"]["l"][0]))
-                    
                     if global_step >= print_step:
-                        mean_return = np.mean(episodes_returns[-args.print_step:])
-                        mean_len = np.mean(episodes_lengths[-args.print_step:])
-                        progress_bar.set_postfix_str(
-                            f"mean_return={mean_return:.2f}, mean_len={mean_len:.2f}, epsilon={epsilon:.2f}"
+                        tqdm.write(
+                            f"global_step={global_step}, episodic_return={info['episode']['r'][0]}, episodic_length={info['episode']['l'][0]}, exploration_rate={epsilon}"
                         )
                         print_step += args.print_step
+                    writer.add_scalar(
+                        "episodic_return", info["episode"]["r"], global_step
+                    )
+                    writer.add_scalar(
+                        "episodic_length", info["episode"]["l"], global_step
+                    )
+                    episodes_returns.append(info["episode"]["r"])
 
-        # Handle episode termination
+        # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
         for idx, trunc in enumerate(truncations):
             if trunc:
                 real_next_obs[idx] = infos["final_observation"][idx]
-        
-        # Add to replay buffer
         rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
+
+        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
 
-        # Training update
-        if global_step > args.learning_starts and global_step % args.train_frequency == 0:
-            data = rb.sample(args.batch_size)
-            
-            with torch.no_grad():
-                # Get target distribution
-                _, next_pmfs = target_network.get_action(data.next_observations.float())
-                next_atoms = data.rewards + args.gamma * target_network.atoms * (1 - data.dones)
-                
-                # Distribution projection
-                delta_z = target_network.atoms[1] - target_network.atoms[0]
-                tz = next_atoms.clamp(args.v_min, args.v_max)
-                b = (tz - args.v_min) / delta_z
-                l = b.floor().clamp(0, args.n_atoms - 1)
-                u = b.ceil().clamp(0, args.n_atoms - 1)
-                
-                # Calculate projected distribution
-                d_m_l = (u + (l == u).float() - b) * next_pmfs
-                d_m_u = (b - l) * next_pmfs
-                target_pmfs = torch.zeros_like(next_pmfs)
-                
-                for i in range(target_pmfs.size(0)):
-                    target_pmfs[i].index_add_(0, l[i].long(), d_m_l[i])
-                    target_pmfs[i].index_add_(0, u[i].long(), d_m_u[i])
+        # ALGO LOGIC: training.
+        if global_step > args.learning_starts:
+            if global_step % args.train_frequency == 0:
+                data = rb.sample(args.batch_size)
+                with torch.no_grad():
+                    _, next_pmfs = target_network.get_action(
+                        data.next_observations.float(),
+                        epsilon=None
+                    )
+                    # observables = get_observables(data.next_observations)
+                    # weights = target_network.get_suggested_action(observables)
+                    # next_pmfs_rules = weights.max(1)[0].unsqueeze(1).expand(-1, target_network.n_atoms)
+                    # next_pmfs = next_pmfs_rules * next_pmfs_q
+                    next_atoms = data.rewards + args.gamma * target_network.atoms * (1 - data.dones)
+                    # projection
+                    delta_z = target_network.atoms[1] - target_network.atoms[0]
+                    tz = next_atoms.clamp(args.v_min, args.v_max)
 
-            # Current network processing
-            _, old_pmfs = q_network.get_action(data.observations.float(), data.actions.flatten())
-            loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
+                    b = (tz - args.v_min) / delta_z
+                    l = b.floor().clamp(0, args.n_atoms - 1)
+                    u = b.ceil().clamp(0, args.n_atoms - 1)
+                    # (l == u).float() handles the case where bj is exactly an integer
+                    # example bj = 1, then the upper ceiling should be uj= 2, and lj= 1
+                    d_m_l = (u + (l == u).float() - b) * next_pmfs
+                    d_m_u = (b - l) * next_pmfs
+                    target_pmfs = torch.zeros_like(next_pmfs)
+                    for i in range(target_pmfs.size(0)):
+                        target_pmfs[i].index_add_(0, l[i].long(), d_m_l[i])
+                        target_pmfs[i].index_add_(0, u[i].long(), d_m_u[i])
 
-            # Logging
-            if global_step % 10000 == 0:
-                writer.add_scalar("losses/loss", loss.item(), global_step)
-                writer.add_scalar("SPS", int(global_step / (time.time() - start_time)), global_step)
+                _, old_pmfs = q_network.get_action(
+                    data.observations.float(), data.actions.flatten(), epsilon=None
+                )
+                # observables = get_observables(data.observations)
+                # weights = q_network.get_suggested_action(observables)
+                # old_pmfs_rules = weights.max(1)[0].unsqueeze(1).expand(-1, q_network.n_atoms)
+                # old_pmfs = old_pmfs_rules * old_pmfs_q
+                loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
 
-            # Gradient step
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+                if global_step % 10000 == 0:
+                    # print(f"global_step={global_step}, loss={loss.item()}")
+                    writer.add_scalar("losses/loss", loss.item(), global_step)
+                    old_val = (old_pmfs * q_network.atoms).sum(1)
+                    writer.add_scalar(
+                        "losses/q_values", old_val.mean().item(), global_step
+                    )
+                    writer.add_scalar(
+                        "SPS",
+                        int(global_step / (time.time() - start_time)),
+                        global_step,
+                    )
 
-            # Update target network
+                # optimize the model
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            # update target network
             if global_step % args.target_network_frequency == 0:
                 target_network.load_state_dict(q_network.state_dict())
 
-    # Save results
-    model_path = f"C51rtPRODUCT/{args.env_id}_c51rtPRODUCT_{args.total_timesteps}_seed{seed}_{start_datetime}"
-    if not os.path.exists("C51rtPRODUCT/"):
-        os.makedirs("C51rtPRODUCT/")
-    os.makedirs(model_path, exist_ok=True)
-
-    # Plot return curve
-    plt.figure()
     plt.plot(episodes_returns)
-    plt.title(f'C51rtPRODUCT on {args.env_id} - Return over {args.total_timesteps} timesteps (seed {seed})')
+    plt.title(f'C51rtSUM on {args.env_id} - Return over {args.total_timesteps} timesteps')
     plt.xlabel("Episode")
     plt.ylabel("Return")
     plt.grid(True)
-    plt.savefig(f"{model_path}/{args.env_id}_c51rtPRODUCT_{args.total_timesteps}_seed{seed}.png")
+    path = f'C51rtSUM/{args.env_id}_c51rtSUM_{args.total_timesteps}_{start_datetime}'
+    if not os.path.exists("C51rtSUM/"):
+        os.makedirs("C51rtSUM/")
+    os.makedirs(path)
+    plt.savefig(f"{path}/{args.env_id}_c51rtSUM_{args.total_timesteps}_{start_datetime}.png")
     plt.close()
+    with open(f"{path}/c51rtSUM_args.txt", "w") as f:
+        for key, value in vars(args).items():
+            if key == "env_id":
+                f.write("# C51 Algorithm specific arguments\n")
+            if key == "sigmoid_shift" or key == "sigmoid_scale" or key == "distribution":
+                continue
+            f.write(f"{key}: {value}\n")
 
     if args.save_model:
-        model_file = f"{model_path}/c51rtPRODUCT_model.pt"
+        model_path = f"{path}/c51rtSUM_model.pt"
         model_data = {
             "model_weights": q_network.state_dict(),
             "args": vars(args),
         }
-        torch.save(model_data, model_file)
-        print(f"Model saved to {model_file}")
-        
-        # Evaluate if requested
-        if args.evaluate:
-            from baseC51.c51_eval import QNetwork as QNetworkEval
-            from c51rtPRODUCT_eval import evaluate
-            eval_episodes=100
-            episodic_returns = evaluate(
-                model_file,
-                make_env,
-                args.env_id,
-                eval_episodes=eval_episodes,
-                run_name=f"{run_name}-eval",
-                Model=QNetworkEval,
-                device=device,
-                epsilon=0
-            )
-            
-            eval_writer = SummaryWriter(f"C51rtPRODUCT/runs_rules_training/{run_name}/eval")
-            for idx, episodic_return in enumerate(episodic_returns):
-                eval_writer.add_scalar("episodic_return", episodic_return, idx)
-            eval_writer.close()
+        torch.save(model_data, model_path)
+        print(f"model saved to {model_path}")
+        from baseC51.c51_eval import QNetwork as QNetworkEval
+        from c51rtSUM_eval import evaluate
+        eval_episodes=100000
+        episodic_returns = evaluate(
+            model_path,
+            make_env,
+            args.env_id,
+            eval_episodes=eval_episodes,
+            run_name=f"{run_name}-eval",
+            Model=QNetworkEval,
+            device=device,
+            epsilon=0,
+        )
+        writer = SummaryWriter(f"C51rtSUM/runs_rules_training/{run_name}/eval")
+        for idx, episodic_return in enumerate(episodic_returns):
+            writer.add_scalar("episodic_return", episodic_return, idx)
 
-    # Cleanup
+        plt.plot(episodic_returns)
+        plt.title(f'C51rtSUM Eval on {args.env_id} - Return over {eval_episodes} episodes')
+        plt.xlabel("Episode")
+        plt.ylabel("Return")
+        plt.ylim(0, 1)
+        plt.grid(True)
+        plt.savefig(f"{path}/{args.env_id}_c51rtSUM_{eval_episodes}_{start_datetime}_eval.png")
+
+        if args.upload_model:
+            from cleanrl_utils.huggingface import push_to_hub
+
+            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
+            push_to_hub(args, episodic_returns, repo_id, "C51rtSUM", f"runs/{run_name}", f"videos/{run_name}-eval")
+
     envs.close()
     writer.close()
-    
-    return episodes_returns, model_path
-
-if __name__ == "__main__":
-    # Configure for performance
-    torch.backends.cudnn.benchmark = False  # More consistent behavior
-    
-    # Parse arguments
-    args = tyro.cli(Args)
-    
-    # Get seed from command line or use default
-    seed = args.seed
-    print(f"Training C51 Rules (PRODUCT) with seed: {seed}")
-    
-    # Run training
-    returns, model_path = train_c51(args, seed)
-    
-    print(f"Training completed! Model saved to {model_path}")
-    print(f"Final mean return for last 10 episodes: {np.mean(returns[-10:]):.2f}")

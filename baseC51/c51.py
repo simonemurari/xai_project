@@ -105,6 +105,7 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
+    torch.backends.cudnn.benchmark = False
 
     device = args.device
 

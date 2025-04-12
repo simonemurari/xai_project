@@ -25,19 +25,32 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Rules applied to the C51 algorithm only during training (v3)
 
+
+# Pre-computed constant arrays for observation processing
+DOOR_STATES = ["open", "closed", "locked"]
+VIEW_SIZE = 7
+MID_POINT = (VIEW_SIZE - 1) // 2
+
+# Pre-computed meshgrid for faster observation processing
+OFFSETS_X, OFFSETS_Y = np.meshgrid(
+    np.arange(VIEW_SIZE) - MID_POINT,
+    np.abs(np.arange(VIEW_SIZE) - (VIEW_SIZE - 1)),
+    indexing="ij",
+)
+
+
+
+
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.FlattenObservation(
-                gym.wrappers.FilterObservation(env, filter_keys=["image"])
-            )
+            env = gym.make(env_id)
+            env = gym.wrappers.FlattenObservation(gym.wrappers.FilterObservation(env, filter_keys=['image', 'direction']))
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
-
         return env
 
     return thunk
@@ -113,191 +126,344 @@ class QNetwork(nn.Module):
         self.n = env.single_action_space.n
         self.network = nn.Sequential(
             nn.Linear(np.array(env.single_observation_space.shape).prod(), 256),
-            nn.LeakyReLU(),
-            nn.Linear(256, 256),
-            nn.LeakyReLU(),
-            nn.Linear(256, self.n * n_atoms),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.n * n_atoms),
         )
-        self.unlocked = False  # door is locked at the start
+        self.rule_pmf = self.rule_distribution().view(1, 1, self.n_atoms) # Pre-compute rule PMF
+                # Define action mappings (adjust as needed based on your environment)
+        self.action_map = {
+            "left": 0,  # Turn left
+            "right": 1,  # Turn right
+            "forward": 2,  # Move forward
+            "pickup": 3,  # Pickup object
+            "toggle": 5,  # Open door
+        }
+
+        # Precomputed direction offsets for more efficient processing
+        self.direction_offsets = {
+            0: (0, -1),  # Left
+            1: (1, 0),  # Up
+            2: (0, 1),  # Right
+            3: (-1, 0),  # Down
+        }
+
+        self.action_stats = {
+            "rule_actions_count": 0,
+            "network_actions_count": 0,
+            "rule_actions": [],
+            "network_actions": [],
+            "global_step": [],
+            "rule_influence": [],
+            "epsilon": []
+        }
 
 
-    def get_action(self, x, action=None):
-        logits = self.network(x)
-        # probability mass function for each action
-        pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
-        observables = get_observables(x)
-        rule_mask = self.get_rule_mask(observables).unsqueeze(2)
-        rule_pmf = self.rule_distribution().view(1, 1, self.n_atoms)
-        rule_pmfs = rule_mask * rule_pmf
-        q_values = (pmfs * self.atoms).sum(2)
-        if action is None:
-            action = torch.argmax(q_values, 1)
-        return action, pmfs[torch.arange(len(x)), action], rule_pmfs[torch.arange(len(x)), action]
+    # def get_action(self, x, action=None):
+    #     logits = self.network(x)
+    #     # probability mass function for each action
+    #     pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
+    #     # Only use the image part
+    #     x = x[:, :7 * 7 * 3]
+    #     observables = get_observables(x)
+    #     rule_mask = self.get_rule_mask(observables).unsqueeze(2)
+    #     rule_pmfs = rule_mask * self.rule_pmf
+    #     combined_pmfs = (1 - epsilon) * pmfs + epsilon * rule_pmfs
+    #     q_values = (combined_pmfs * self.atoms).sum(2)
+    #     if action is None:
+    #         action = torch.argmax(q_values, 1)
+    #     return action, combined_pmfs[torch.arange(len(x)), action]
     
     
     def rule_distribution(self):
-        """
-        Computes a sigmoid distribution over the 51 atoms that starts at 0,
-        increases slowly, and only reaches its maximum value at 1.
-        The distribution is then normalized into a valid PMF.
-        """
-        rule_shift = Args.sigmoid_shift
-        rule_scale = Args.sigmoid_scale
-
-        # Compute the standard sigmoid over the atoms
+        """More moderate rule distribution"""
+        # Use more moderate parameter values
+        rule_shift = 0.4  # Move sigmoid center point
+        rule_scale = 5.0  # Less extreme scale
+        
+        # Compute sigmoid over atoms with moderate parameters
         s = torch.sigmoid(rule_scale * (self.atoms - rule_shift))
-        
         rule_pmf = s / s.sum()
-
-        # # plot pmf
-        # x = np.linspace(0, 1, self.n_atoms)
-        # plt.figure(figsize=(8, 6))
-        # x = np.linspace(0, 1, 51)
-        # plt.bar(x, rule_pmf, width=(1 / 51) * 0.8)
-        # plt.xlabel("Return Value (Atom)")
-        # plt.ylabel("Probability")
-        # plt.xlim(-0.05, 1.05)
-        # plt.grid(axis='y', alpha=0.75)
-        # plt.savefig(f"plots/rule_pmf_{rule_shift}_{rule_scale}.png")
-        # plt.close()
-        # asfasf
+        
         return rule_pmf
+    
+    def plot_rule_distribution(self):
+        rule_pmf_np = self.rule_pmf.squeeze().numpy()  # Convert to NumPy for plotting
+        plt.figure(figsize=(8, 6))
+        x = np.linspace(0, 1, 51)
+        plt.bar(x, rule_pmf_np, width=(1 / 51) * 0.8)
+        plt.xlabel("Return Value (Atom)")
+        plt.ylabel("Probability")
+        plt.xlim(-0.05, 1.05)
+        plt.grid(axis='y', alpha=0.75)
+        plt.savefig(f"plots/rule_pmf_v3_{Args.sigmoid_shift}_{Args.sigmoid_scale}.png")  # Save the plot
+        plt.close()
 
 
-    def get_rule_mask(self, batch_of_observables):
-        """
-        Optimized vectorized version that processes multiple observations in parallel.
-        """
-        device = Args.device
-        batch_size = len(batch_of_observables)
+    def get_action(self, x, action=None):
+        """Simplified action selection with rule guidance"""
+        batch_size = len(x)
         
-        # Pre-allocate tensors
-        rule_mask = torch.zeros(batch_size, self.n, device=device)
-        for batch_idx, observables in enumerate(batch_of_observables):
-            # State tracking with minimal variables
-            carrying_key = None
-            door_state = None
-            has_door_front = False
-            has_key_front = False
-            wall_state = [False, False, False]  # left, right, front
-            goal_data = [0, False]  # x, is_front
-            
-            # Single pass through observations
-            for name, args in observables:
-                match name:
-                    case "door" if args[1:] == [0, 1]:
-                        has_door_front = True
-                        door_color = args[0]
-                    case "key" if args[1:] == [0, 1]:
-                        has_key_front = True
-                    case "carryingKey":
-                        carrying_key = args[0]
-                    case "goal":
-                        goal_data[0] = args[0]
-                        goal_data[1] = args[1] == 1
-                    case "wall":
-                        x, y = args
-                        if y == 0:
-                            if x == -1:
-                                wall_state[0] = True
-                            elif x == 1:
-                                wall_state[1] = True
-                        elif x == 0 and y == 1:
-                            wall_state[2] = True
-                    case state if state in ["open", "closed", "locked"]:
-                        door_state = (state, args[0])
-            
-            # Fast action selection with minimal branching
-            if not carrying_key and has_key_front:
-                rule_mask[batch_idx, 3] = 1
-            
-            # Door interaction
-            if door_state and door_state[0] == "locked" and carrying_key:
-                if has_door_front and carrying_key == door_color:
-                    rule_mask[batch_idx, 5] = 1
-                    self.unlocked = True
-            
-            # Movement logic
-            if goal_data[1] and self.unlocked:
-                rule_mask[batch_idx, 2] = 1
-                self.unlocked = False
-            elif goal_data[0]:
-                if goal_data[0] < 0 and not wall_state[0]:
-                    rule_mask[batch_idx, 0] = 1
-                elif goal_data[0] > 0 and not wall_state[1]:
-                    rule_mask[batch_idx, 1] = 1
-                elif not wall_state[2]:
-                    rule_mask[batch_idx, 2] = 1
+        # Get distributional Q-values from the network
+        logits = self.network(x)
+        pmfs = torch.softmax(logits.view(batch_size, self.n, self.n_atoms), dim=2)
         
-        return rule_mask
+        # Get rule suggestions (could be None for some samples)
+        rule_actions = self._apply_rules_batch(self.get_observables(x[:, 4:]))
+        
+        # Apply rule influence through a more efficient tensor operation
+        rule_influence = torch.ones_like(pmfs)
+        
+        # Set rule influence for specific actions where rules apply
+        for i, act in enumerate(rule_actions):
+            if act is not None:
+                # Scale up probability for the suggested action
+                rule_influence[i, act] = self.rule_pmf
+        
+        combined_pmfs = pmfs * rule_influence
+        # Renormalize
+        combined_pmfs = combined_pmfs / combined_pmfs.sum(dim=2, keepdim=True)
+        
+        q_values = (combined_pmfs * self.atoms).sum(2)
+        if action is None:
+            action = torch.argmax(q_values, dim=1)
+        
+        return action, combined_pmfs[torch.arange(len(x)), action]
+
+    def _apply_rules_batch(self, batch_observables):
+        """Apply rules to each environment observation in the batch"""
+        rule_actions = []
+        
+        for observables in batch_observables:
+            # Parse observables
+            keys = [o for o in observables if o[0] == "key"]
+            doors = [o for o in observables if o[0] == "door"]
+            goals = [o for o in observables if o[0] == "goal"]
+            walls = [o for o in observables if o[0] == "wall"]
+            carrying_keys = [o for o in observables if o[0] == "carryingKey"]
+            locked_doors = [o for o in observables if o[0] == "locked"]
+            closed_doors = [o for o in observables if o[0] == "closed"]
+
+            # Rule 1: pickup(X) :- key(X), samecolor(X,Y), door(Y), notcarrying
+            if keys and doors and not carrying_keys:
+                for key in keys:
+                    key_color = key[1][0]
+                    matching_doors = [door for door in doors if door[1][0] == key_color]
+                    if matching_doors:
+                        # Check if key is directly in front
+                        key_x, key_y = key[1][1], key[1][2]
+                        if key_x == 0 and key_y == 1:  # Key is directly in front
+                            rule_actions.append(self.action_map["pickup"])
+                            break
+                        else:
+                            # Move towards the key with wall avoidance
+                            action = self._navigate_towards(key_x, key_y, walls)
+                            rule_actions.append(action)
+                            break
+                else:
+                    rule_actions.append(None)  # No applicable key found
+
+            # Rule 2: open(X) :- door(X), locked(X), key(Z), carryingKey(Z), samecolor(X,Z)
+            elif doors and locked_doors and carrying_keys:
+                carrying_key_color = carrying_keys[0][1][0]
+
+                # Check locked doors first (priority)
+                matching_doors_to_open = []
+                if locked_doors:
+                    for door in doors:
+                        door_color = door[1][0]
+                        if door_color == carrying_key_color:
+                            for locked in locked_doors:
+                                if locked[1][0] == door_color:
+                                    matching_doors_to_open.append(door)
+
+                if matching_doors_to_open:
+                    door = matching_doors_to_open[0]
+                    door_x, door_y = door[1][1], door[1][2]
+                    if door_x == 0 and door_y == 1:  # Door is directly in front
+                        rule_actions.append(self.action_map["toggle"])
+                    else:
+                        # Move towards the door with wall avoidance
+                        action = self._navigate_towards(door_x, door_y, walls)
+                        rule_actions.append(action)
+                else:
+                    rule_actions.append(None)
+
+            # Rule 3: goto :- goal(X), unlocked
+            elif goals:
+                goal = goals[0]
+                goal_x, goal_y = goal[1][0], goal[1][1]
+
+                # Check if there's a clear path to the goal (no closed/locked doors in the way)
+                blocked_by_door = False
+
+                # Simple check: if we see a closed/locked door that's between us and the goal
+                direction_to_goal = (
+                    1 if goal_x > 0 else (-1 if goal_x < 0 else 0),
+                    1 if goal_y > 0 else (-1 if goal_y < 0 else 0),
+                )
+
+                # Only consider a door blocking if it's in the same general direction as the goal
+                for door in doors:
+                    door_x, door_y = door[1][1], door[1][2]
+                    door_direction = (
+                        1 if door_x > 0 else (-1 if door_x < 0 else 0),
+                        1 if door_y > 0 else (-1 if door_y < 0 else 0),
+                    )
+
+                    door_color = door[1][0]
+                    # Check if the door is in the same general direction as the goal
+                    same_direction = (
+                        direction_to_goal[0] == door_direction[0]
+                        and direction_to_goal[1] == door_direction[1]
+                    )
+
+                    # Check if door is closer than the goal
+                    door_distance = abs(door_x) + abs(door_y)
+                    goal_distance = abs(goal_x) + abs(goal_y)
+                    door_is_closer = door_distance < goal_distance
+
+                    # Check if the door is closed or locked
+                    door_is_closed = any(cd[1][0] == door_color for cd in closed_doors)
+                    door_is_locked = any(ld[1][0] == door_color for ld in locked_doors)
+
+                    if (
+                        same_direction
+                        and door_is_closer
+                        and (door_is_closed or door_is_locked)
+                    ):
+                        blocked_by_door = True
+                        break
+
+                if not blocked_by_door:
+                    if goal_x == 0 and goal_y == 1:  # Goal is directly in front
+                        rule_actions.append(self.action_map["forward"])
+                    else:
+                        # Move towards the goal with wall avoidance
+                        action = self._navigate_towards(goal_x, goal_y, walls)
+                        rule_actions.append(action)
+                else:
+                    rule_actions.append(None)
+            else:
+                rule_actions.append(None)  # No applicable rule
+
+        return rule_actions
+
+    def _navigate_towards(self, target_x, target_y, walls=None):
+        """
+        Improved navigation helper that avoids walls when moving towards a target
+
+        Args:   
+            target_x: Relative x-coordinate of the target
+            target_y: Relative y-coordinate of the target
+            walls: List of wall observations with their positions
+        """
+        # If no walls, use simpler navigation
+        if not walls:
+            if target_y > 0:  # Target is in front
+                return self.action_map["forward"]
+            elif target_x < 0:  # Target is to the left
+                return self.action_map["left"]
+            elif target_x > 0:  # Target is to the right
+                return self.action_map["right"]
+            else:  # Target is behind, turn around
+                return self.action_map["right"]
+
+        # Check if there's a wall directly in front
+        wall_in_front = any(w[1][0] == 0 and w[1][1] == 1 for w in walls)
+
+        # Determine the relative position of the target
+        if target_y > 0:  # Target is in front
+            if not wall_in_front:
+                return self.action_map["forward"]
+            else:
+                # Wall blocking forward movement, turn to find another path
+                return (
+                    self.action_map["left"]
+                    if target_x <= 0
+                    else self.action_map["right"]
+                )
+        elif target_x < 0:  # Target is to the left
+            return self.action_map["left"]
+        elif target_x > 0:  # Target is to the right
+            return self.action_map["right"]
+        else:  # Target is behind
+            # Choose a turn direction based on wall presence
+            wall_to_left = any(w[1][0] == -1 and w[1][1] == 0 for w in walls)
+            if wall_to_left:
+                return self.action_map["right"]
+            else:
+                return self.action_map["left"]
+            
+    def get_observables(self, raw_obs_batch):
+        """
+        Vectorized version of get_observables that processes entire batch at once
+        Args:
+            raw_obs_batch: shape (batch_size, H*W*C) or (batch_size, H, W, C)
+        Returns:
+            List of observation lists for each item in batch
+        """
+        DOOR_STATES = ["open", "closed", "locked"]
+        view_size = 7
+        mid = (view_size - 1) // 2
+        batch_size = raw_obs_batch.shape[0]
+        
+        if isinstance(raw_obs_batch, torch.Tensor):
+            raw_obs_batch = raw_obs_batch.cpu().numpy()
+        
+        # Reshape to (batch_size, H, W, C)
+        img_batch = raw_obs_batch.reshape(batch_size, view_size, view_size, 3)
+        
+        # Pre-compute offsets once
+        i, j = np.meshgrid(np.arange(view_size), np.arange(view_size), indexing='ij')
+        offset_x = i - mid
+        offset_y = np.abs(j - (view_size - 1))
+        
+        batch_obs = []
+        
+        # Process each batch item
+        for img in img_batch:
+            obs = []
+            item_first = img[..., 0]
+            item_second = img[..., 1]
+            
+            # Find all object positions at once
+            key_positions = np.where(item_first == 5)
+            door_positions = np.where(item_first == 4)
+            goal_positions = np.where(item_first == 8)
+            wall_positions = np.where(item_first == 2)
+            
+            # Process keys
+            for k_i, k_j in zip(*key_positions):
+                color = IDX_TO_COLOR.get(item_second[k_i, k_j])
+                obs.append(("key", [color, offset_x[k_i, k_j], offset_y[k_i, k_j]]))
+                if k_i == mid and k_j == view_size - 1:
+                    obs.append(("carryingKey", [color]))
+            
+            # Process doors
+            for d_i, d_j in zip(*door_positions):
+                color = IDX_TO_COLOR.get(item_second[d_i, d_j])
+                obs.append(("door", [color, offset_x[d_i, d_j], offset_y[d_i, d_j]]))
+                obs.append((DOOR_STATES[2], [color]))
+            
+            # Process goals
+            for g_i, g_j in zip(*goal_positions):
+                obs.append(("goal", [offset_x[g_i, g_j], offset_y[g_i, g_j]]))
+            
+            # Process walls
+            for w_i, w_j in zip(*wall_positions):
+                obs.append(("wall", [offset_x[w_i, w_j], offset_y[w_i, w_j]]))
+                
+            batch_obs.append(obs)
+        
+        return batch_obs
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
-def get_observables(raw_obs_batch):
-    """
-    Vectorized version of get_observables that processes entire batch at once
-    Args:
-        raw_obs_batch: shape (batch_size, H*W*C) or (batch_size, H, W, C)
-    Returns:
-        List of observation lists for each item in batch
-    """
-    DOOR_STATES = ["open", "closed", "locked"]
-    view_size = 7
-    mid = (view_size - 1) // 2
-    batch_size = raw_obs_batch.shape[0]
-    
-    if isinstance(raw_obs_batch, torch.Tensor):
-        raw_obs_batch = raw_obs_batch.cpu().numpy()
-    
-    # Reshape to (batch_size, H, W, C)
-    img_batch = raw_obs_batch.reshape(batch_size, view_size, view_size, 3)
-    
-    # Pre-compute offsets once
-    i, j = np.meshgrid(np.arange(view_size), np.arange(view_size), indexing='ij')
-    offset_x = i - mid
-    offset_y = np.abs(j - (view_size - 1))
-    
-    batch_obs = []
-    
-    # Process each batch item
-    for img in img_batch:
-        obs = []
-        item_first = img[..., 0]
-        item_second = img[..., 1]
-        
-        # Find all object positions at once
-        key_positions = np.where(item_first == 5)
-        door_positions = np.where(item_first == 4)
-        goal_positions = np.where(item_first == 8)
-        wall_positions = np.where(item_first == 2)
-        
-        # Process keys
-        for k_i, k_j in zip(*key_positions):
-            color = IDX_TO_COLOR.get(item_second[k_i, k_j])
-            obs.append(("key", [color, offset_x[k_i, k_j], offset_y[k_i, k_j]]))
-            if k_i == mid and k_j == view_size - 1:
-                obs.append(("carryingKey", [color]))
-        
-        # Process doors
-        for d_i, d_j in zip(*door_positions):
-            color = IDX_TO_COLOR.get(item_second[d_i, d_j])
-            obs.append(("door", [color, offset_x[d_i, d_j], offset_y[d_i, d_j]]))
-            obs.append((DOOR_STATES[2], [color]))
-        
-        # Process goals
-        for g_i, g_j in zip(*goal_positions):
-            obs.append(("goal", [offset_x[g_i, g_j], offset_y[g_i, g_j]]))
-        
-        # Process walls
-        for w_i, w_j in zip(*wall_positions):
-            obs.append(("wall", [offset_x[w_i, w_j], offset_y[w_i, w_j]]))
-            
-        batch_obs.append(obs)
-    
-    return batch_obs
 
 if __name__ == "__main__":
     start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
@@ -316,7 +482,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rtv3_{args.sigmoid_shift}_{args.sigmoid_scale}_{args.exploration_fraction}_v11"
+            group=f"C51rtv3_{args.sigmoid_shift}_{args.sigmoid_scale}_{args.exploration_fraction}_{args.run_code}",
         )
     writer = SummaryWriter(f"C51rtv3/runs_rules_training/{run_name}/train")
     writer.add_text(
@@ -325,6 +491,7 @@ if __name__ == "__main__":
         % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
     episodes_returns = []
+
 
     # TRY NOT TO MODIFY: seeding
     print(f'File: {os.path.basename(__file__)}, using seed {args.seed} and exploration fraction {args.exploration_fraction}')
@@ -365,6 +532,8 @@ if __name__ == "__main__":
     )
     start_time = time.time()
 
+    global epsilon
+
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     print_step = args.print_step
@@ -382,11 +551,13 @@ if __name__ == "__main__":
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            actions, pmf, _ = q_network.get_action(
+            actions, pmf = q_network.get_action(
                 torch.Tensor(obs).float().to(device),
             )
-            actions = actions.cpu().numpy()
-
+            if isinstance(actions, torch.Tensor):
+                actions = actions.cpu().numpy()
+            else:
+                actions = np.array([actions])
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
@@ -406,7 +577,6 @@ if __name__ == "__main__":
                         "episodic_length", info["episode"]["l"], global_step
                     )
                     episodes_returns.append(info["episode"]["r"])
-                    q_network.unlocked = False
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
@@ -423,10 +593,9 @@ if __name__ == "__main__":
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
-                    _, next_q_pmfs, next_rule_pmfs = target_network.get_action(
+                    _, next_pmfs = target_network.get_action(
                         data.next_observations.float(),
                     )
-                    next_pmfs = (1 - epsilon) * next_q_pmfs + epsilon * next_rule_pmfs
                     next_atoms = data.rewards + args.gamma * target_network.atoms * (1 - data.dones)
                     # projection
                     delta_z = target_network.atoms[1] - target_network.atoms[0]
@@ -444,10 +613,9 @@ if __name__ == "__main__":
                         target_pmfs[i].index_add_(0, l[i].long(), d_m_l[i])
                         target_pmfs[i].index_add_(0, u[i].long(), d_m_u[i])
 
-                _, old_pmfs_q, old_rule_pmfs = q_network.get_action(
+                _, old_pmfs = q_network.get_action(
                     data.observations.float(), data.actions.flatten()
                 )
-                old_pmfs = (1 - epsilon) * old_pmfs_q + epsilon * old_rule_pmfs
                 loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
 
                 if global_step % 10000 == 0:
