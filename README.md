@@ -32,7 +32,7 @@ In this repository you can find the code to run the C51 algorithm and its variat
 2. **Configure wandb (optional)** \
    If you want to use wandb tracking, create a `.env` file in the repository root and set the proper environment variables (WANDB_PROJECT_NAME, WANDB_ENTITY).
 
-3. **Configure the config.py file**
+3. **Configure the config.py file** \
    In the file convergence_8x8_parameters you can find the parameters that will make all algorithms converge in the 8x8 map.
 
 4. **Run the scripts** \
