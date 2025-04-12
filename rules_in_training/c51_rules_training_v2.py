@@ -86,18 +86,7 @@ class QNetwork(nn.Module):
             3: (-1, 0),  # Down
         }
 
-        self.action_stats = {
-            "rule_actions_count": 0,
-            "network_actions_count": 0,
-            "rule_actions": [],
-            "network_actions": [],
-            "global_step": [],
-            "rule_influence": [],
-            "epsilon": []
-        }
 
-
-    
     def get_action(self, x, action=None, observables=None, epsilon=0.0, global_step=None):
         """
         Enhanced action selection that combines C51 distribution with rule-based guidance
@@ -105,7 +94,6 @@ class QNetwork(nn.Module):
         """
         
         batch_size = len(x)
-        # print(f"Batch size: {batch_size}, x.shape: {x.shape}")
 
         # Get distributional Q-values from the network
         logits = self.network(x)
@@ -133,19 +121,6 @@ class QNetwork(nn.Module):
         # Shape the policy by multiplying Q-values with rule distribution
         shaped_q_values = q_values * dist
         final_action = torch.argmax(shaped_q_values, dim=1)
-
-        if torch.argmax(q_values, dim=1) != final_action:
-            self.action_stats["rule_actions_count"] += 1
-
-        else:
-            self.action_stats["network_actions_count"] += 1
-        
-        self.action_stats["rule_actions"].append(self.action_stats["rule_actions_count"])
-        self.action_stats["network_actions"].append(self.action_stats["network_actions_count"])
-        self.action_stats["global_step"].append(global_step)
-        self.action_stats["rule_influence"].append(rule_influence)
-        self.action_stats["epsilon"].append(epsilon)
-
            
         return final_action, pmfs[torch.arange(batch_size), final_action]
 
