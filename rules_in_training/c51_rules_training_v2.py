@@ -78,15 +78,6 @@ class QNetwork(nn.Module):
             "toggle": 5,  # Open door
         }
 
-        # Precomputed direction offsets for more efficient processing
-        self.direction_offsets = {
-            0: (0, -1),  # Left
-            1: (1, 0),  # Up
-            2: (0, 1),  # Right
-            3: (-1, 0),  # Down
-        }
-
-
     def get_action(self, x, action=None, observables=None, epsilon=0.0, global_step=None):
         """
         Enhanced action selection that combines C51 distribution with rule-based guidance
@@ -288,68 +279,6 @@ class QNetwork(nn.Module):
                 return self.action_map["right"]
             else:
                 return self.action_map["left"]
-            
-    def plot_action_tracking(self):
-        """Plot the rule vs. network action tracking data"""
-        import matplotlib.pyplot as plt
-        
-        # Create a figure with subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-
-        # Prepare data arrays from the tracking data
-        steps = self.action_stats["global_step"]
-        rule_followed = self.action_stats["rule_actions"]
-        network_followed = self.action_stats["network_actions"]
-        rule_influence_values = self.action_stats["rule_influence"]
-        
-        # # Process tracking data into arrays for plotting
-        # for step in range(self.action_stats["global_step"]):
-        #     if step % 1000 == 0:  # Sample at regular intervals
-        #         steps.append(step)
-        #         print(f"Step {step}: rule_influence={self.action_stats['rule_influence']:.2f}")
-                
-        #         # Calculate proportions in the current window
-        #         if current_window:
-        #             rule_followed.append(current_window.count('rule') / len(current_window))
-        #             network_followed.append(current_window.count('network') / len(current_window))
-        #             rule_influence_values.append(self.action_stats["rule_influence"])
-        #             current_window = []
-        
-        # Plot rule influence over time
-        ax1.plot(steps, rule_influence_values, 'b-', label='Rule Influence')
-        ax1.set_xlabel('Training steps')
-        ax1.set_ylabel('Rule influence parameter')
-        ax1.set_title('Rule Influence Parameter Over Training')
-        ax1.legend()
-        ax1.grid(True)
-        
-        # Plot proportion of rule vs. network decisions
-        ax2.plot(steps, rule_followed, 'g-', label='Rule-based actions')
-        ax2.plot(steps, network_followed, 'r-', label='Network-based actions')
-        ax2.set_xlabel('Training steps')
-        ax2.set_ylabel('Proportion of actions')
-        ax2.set_title('Proportion of Actions Determined by Rules vs. Network')
-        ax2.legend()
-        ax2.grid(True)
-        
-        # Add summary statistics
-        plt.figtext(0.5, 0.01, 
-            f"Total actions: {len(self.action_stats['global_step'])}\n" +
-            f"Rule-based actions: {self.action_stats['rule_actions_count']} " +
-            f"({self.action_stats['rule_actions_count']/max(1, len(self.action_stats['global_step'])):.1%})\n" +
-            f"Network-based actions: {self.action_stats['network_actions_count']} " +
-            f"({self.action_stats['network_actions_count']/max(1, len(self.action_stats['global_step'])):.1%})",
-            ha='center', fontsize=12, bbox=dict(facecolor='white', alpha=0.5))
-        
-        plt.tight_layout()
-        plt.subplots_adjust(bottom=0.15)
-        
-        # Save the figure
-        model_path = f"C51rtv2/action_tracking_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        plt.savefig(model_path)
-        plt.close()
-        
-        print(f"Saved action tracking plot to {model_path}")
 
     # Optimize observation processing with NumPy
     def get_observables(self, raw_obs_batch):

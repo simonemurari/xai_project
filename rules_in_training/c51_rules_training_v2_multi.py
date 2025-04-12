@@ -108,14 +108,6 @@ class QNetwork(nn.Module):
             "toggle": 5,  # Open door
         }
 
-        # Precomputed direction offsets for more efficient processing
-        self.direction_offsets = {
-            0: (0, -1),  # Left
-            1: (1, 0),  # Up
-            2: (0, 1),  # Right
-            3: (-1, 0),  # Down
-        }
-
 
     
     def get_action(self, x, action=None, observables=None, epsilon=0.0):
