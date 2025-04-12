@@ -98,7 +98,7 @@ class QNetwork(nn.Module):
             return action, pmfs[torch.arange(batch_size), action]
 
         # Apply rule-based action guidance to the batch
-        rule_action = self._apply_rules_batch(observables)[0]
+        rule_action = self._get_suggested_action(observables)[0]
 
         # Rule influence parameter
         rule_influence = 0.8 * epsilon + 0.2
@@ -115,7 +115,7 @@ class QNetwork(nn.Module):
            
         return final_action, pmfs[torch.arange(batch_size), final_action]
 
-    def _apply_rules_batch(self, batch_observables):
+    def _get_suggested_action(self, batch_observables):
         """Apply rules to each environment observation in the batch"""
         rule_actions = []
 
