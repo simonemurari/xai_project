@@ -77,6 +77,7 @@ class QNetwork(nn.Module):
             "pickup": 3,  # Pickup object
             "toggle": 5,  # Open door
         }
+        self.conf_level = 0.8  # Confidence level for rule-based actions
 
     
     def get_action(self, x, action=None, observables=None, epsilon=0.0):
@@ -234,6 +235,123 @@ class QNetwork(nn.Module):
                 rule_actions.append(None)  # No applicable rule
 
         return rule_actions
+    
+    def _get_weights(self, batch_of_observables):
+        """
+        Apply rules to observations and return action weights for each observation
+        """
+        device = self.atoms.device
+        batch_size = len(batch_of_observables)
+        
+        # Pre-allocate tensor with default low confidence
+        weights = torch.full((batch_size, self.n), 1 - self.conf_level, device=device)
+        
+        for batch_idx, observables in enumerate(batch_of_observables):
+            # Parse observables
+            keys = [o for o in observables if o[0] == "key"]
+            doors = [o for o in observables if o[0] == "door"]
+            goals = [o for o in observables if o[0] == "goal"]
+            walls = [o for o in observables if o[0] == "wall"]
+            carrying_keys = [o for o in observables if o[0] == "carryingKey"]
+            locked_doors = [o for o in observables if o[0] == "locked"]
+            closed_doors = [o for o in observables if o[0] == "closed"]
+            
+            # Rule 1: pickup(X) :- key(X), samecolor(X,Y), door(Y), notcarrying
+            if keys and doors and not carrying_keys:
+                for key in keys:
+                    key_color = key[1][0]
+                    matching_doors = [door for door in doors if door[1][0] == key_color]
+                    if matching_doors:
+                        # Check if key is directly in front
+                        key_x, key_y = key[1][1], key[1][2]
+                        if key_x == 0 and key_y == 1:  # Key is directly in front
+                            weights[batch_idx, 3] = self.conf_level  # pickup action
+                            break
+                        else:
+                            # Move towards the key with wall avoidance
+                            action = self._navigate_towards(key_x, key_y, walls)
+                            weights[batch_idx, action] = self.conf_level
+                            break
+            
+            # Rule 2: open(X) :- door(X), locked(X), key(Z), carryingKey(Z), samecolor(X,Z)
+            elif doors and locked_doors and carrying_keys:
+                carrying_key_color = carrying_keys[0][1][0]
+
+                # Check locked doors first (priority)
+                matching_doors_to_open = []
+                if locked_doors:
+                    for door in doors:
+                        door_color = door[1][0]
+                        if door_color == carrying_key_color:
+                            for locked in locked_doors:
+                                if locked[1][0] == door_color:
+                                    matching_doors_to_open.append(door)
+
+                if matching_doors_to_open:
+                    door = matching_doors_to_open[0]
+                    door_x, door_y = door[1][1], door[1][2]
+                    if door_x == 0 and door_y == 1:  # Door is directly in front
+                        weights[batch_idx, 5] = self.conf_level  # toggle action
+                    else:
+                        # Move towards the door with wall avoidance
+                        action = self._navigate_towards(door_x, door_y, walls)
+                        weights[batch_idx, action] = self.conf_level
+            
+            # Rule 3: goto :- goal(X), unlocked
+            elif goals:
+                goal = goals[0]
+                goal_x, goal_y = goal[1][0], goal[1][1]
+
+                # Check if path to goal is blocked by closed/locked doors
+                blocked_by_door = False
+                
+                # Direction to goal
+                direction_to_goal = (
+                    1 if goal_x > 0 else (-1 if goal_x < 0 else 0),
+                    1 if goal_y > 0 else (-1 if goal_y < 0 else 0),
+                )
+
+                # Check if any door blocks the path
+                for door in doors:
+                    door_x, door_y = door[1][1], door[1][2]
+                    door_direction = (
+                        1 if door_x > 0 else (-1 if door_x < 0 else 0),
+                        1 if door_y > 0 else (-1 if door_y < 0 else 0),
+                    )
+
+                    door_color = door[1][0]
+                    
+                    # Check if door is in same direction and closer than goal
+                    same_direction = (
+                        direction_to_goal[0] == door_direction[0] and 
+                        direction_to_goal[1] == door_direction[1]
+                    )
+                    
+                    door_distance = abs(door_x) + abs(door_y)
+                    goal_distance = abs(goal_x) + abs(goal_y)
+                    door_is_closer = door_distance < goal_distance
+
+                    # Check door state
+                    door_is_closed = any(cd[1][0] == door_color for cd in closed_doors)
+                    door_is_locked = any(ld[1][0] == door_color for ld in locked_doors)
+
+                    if (same_direction and door_is_closer and 
+                        (door_is_closed or door_is_locked)):
+                        blocked_by_door = True
+                        break
+
+                if not blocked_by_door:
+                    if goal_x == 0 and goal_y == 1:  # Goal is directly in front
+                        weights[batch_idx, 2] = self.conf_level  # forward action
+                    else:
+                        # Move towards the goal with wall avoidance
+                        action = self._navigate_towards(goal_x, goal_y, walls)
+                        weights[batch_idx, action] = self.conf_level
+        
+        # Normalize weights to sum to 1.0 per observation
+        weights = weights / weights.sum(1, keepdim=True)
+        
+        return weights
 
     def _navigate_towards(self, target_x, target_y, walls=None):
         """
@@ -472,20 +590,9 @@ def train_c51(args, seed):
         if random.random() < epsilon:
             obs_tensor.copy_(torch.as_tensor(obs, dtype=torch.float32))
             obs_img = q_network.get_observables(obs_tensor[:, 4:])
-            # Apply rule-based action guidance to the batch
-            rule_action = q_network._apply_rules_batch(obs_img)[0]
-
-            # Rule influence parameter
-            rule_influence = 0.8 * epsilon + 0.2
-
-            dist = torch.ones((q_network.n), device=Args.device) * (1 - rule_influence) / (q_network.n - 1)
-            dist[rule_action] = rule_influence
-            
-            # Normalize distribution
-            dist = dist / dist.sum()
-
+            weights = q_network._get_weights(obs_img).squeeze().cpu().numpy()
             actions = np.random.choice(
-                q_network.n, p=dist.cpu().numpy(), size=(envs.num_envs,)
+                q_network.n, p=weights, size=(envs.num_envs,)
             )
         else:
             # Reuse pre-allocated tensor for efficiency
@@ -493,7 +600,7 @@ def train_c51(args, seed):
             obs_img = q_network.get_observables(obs_tensor[:, 4:])
             with torch.no_grad():
                 actions, _ = q_network.get_action(
-                    obs_tensor, observables=obs_img, epsilon=epsilon
+                    obs_tensor, observables=obs_img
                 )
                 actions = actions.cpu().numpy()
 

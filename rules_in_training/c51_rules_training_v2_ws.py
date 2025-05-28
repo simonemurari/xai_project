@@ -137,7 +137,7 @@ class QNetwork(nn.Module):
         dist = dist / dist.sum()
 
         # Shape the policy by multiplying Q-values with rule distribution
-        shaped_q_values = q_values * dist
+        shaped_q_values = q_values * (1 - rule_influence) + dist * rule_influence
         final_action = torch.argmax(shaped_q_values, dim=1)
 
         # Instead of separate arrays, track which action type was chosen
@@ -260,7 +260,7 @@ class QNetwork(nn.Module):
         plt.subplots_adjust(bottom=0.15)
 
         model_path = (
-            f"C51rtv2/action_tracking{datetime.now().strftime('%Y%m%d_%H%M%S')}_rtv2.png"
+            f"C51rtv2/action_tracking{datetime.now().strftime('%Y%m%d_%H%M%S')}_rtv2ws.png"
         )
         plt.savefig(model_path)
         plt.close()

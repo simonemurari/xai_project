@@ -8,27 +8,28 @@ load_dotenv(".env")
 WANDB_PROJECT_NAME = os.getenv("WANDB_PROJECT_NAME")
 WANDB_ENTITY = os.getenv("WANDB_ENTITY")
 
+
 @dataclass
 class Args:
     # General arguments
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    
+
     seed: int = 6
     """seed of the experiment"""
 
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "8x8_v2"
+    run_code: str = "16x16_1key_v2"
     """the group of the run"""
 
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    
+
     # device: str = "cuda" if torch.cuda.is_available() else "cpu"
     device: str = "cpu"
-    """the device to run the experiment on (set it to cuda if using GPU)"""
+    # """the device to run the experiment on (set it to cuda if using GPU)"""
 
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
@@ -51,25 +52,23 @@ class Args:
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
-    print_step: int = 200000
+    print_step: int = 200_000
     """the frequency to printout the training progress"""
 
-    sigmoid_shift: float = 0.75
-    """the sigmoid shift value for the C51 algorithm"""
-
-    sigmoid_scale: float = 25
-    """the sigmoid scale value for the C51 algorithm"""
 
     # C51 Algorithm specific arguments
     size_env: int = 8
     """the size of the environment (5, 6, 8, 16)"""
 
+    n_keys: int = 1
+    """the number of keys in the environment"""
+
     env_id: str = f"MiniGrid-DoorKey-{size_env}x{size_env}-v0"
     """the id of the environment"""
-    
+
     total_timesteps: int = 3_000_000
     """total timesteps of the experiments"""
-    
+
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
 
@@ -103,9 +102,8 @@ class Args:
     exploration_fraction: float = 0.3
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
 
-    learning_starts: int = 50_000 
+    learning_starts: int = 50_000
     """timestep to start learning"""
 
     train_frequency: int = 2
     """the frequency of training"""
-

@@ -22,10 +22,8 @@ C51rtsum/
 C51rtv2/
 C51rtv2exp/
 C51rtv3/
+C51rtv3ws/
 runs/
-DQN/
-config_dqn.py
-dqn.py
 run_3_seeds.sh
 run_5_seeds.sh
 run_5_seeds_delayed.sh

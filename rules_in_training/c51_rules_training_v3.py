@@ -5,11 +5,13 @@ import time
 from datetime import datetime
 import sys
 from pathlib import Path
+
 sys.path.append(str(Path(__file__).parent.parent))
 from config import Args
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import gymnasium as gym
+from collections import namedtuple
 import numpy as np
 import torch
 import torch.nn as nn
@@ -19,12 +21,25 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 from minigrid.core.constants import IDX_TO_COLOR
 import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning) 
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Add the same RuleAugmentedReplayBufferSamples namedtuple as c51_rules_training_v3_ws.py
+RuleAugmentedReplayBufferSamples = namedtuple(
+    "RuleAugmentedReplayBufferSamples",
+    [
+        "observations",
+        "actions",
+        "next_observations",
+        "dones",
+        "rewards",
+        "rule_suggestions",
+    ],
+)
 
 # print(f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}")
 
 # Rules applied to the C51 algorithm only during training (v3)
-
 
 # Pre-computed constant arrays for observation processing
 DOOR_STATES = ["open", "closed", "locked"]
@@ -39,21 +54,89 @@ OFFSETS_X, OFFSETS_Y = np.meshgrid(
 )
 
 
+# Add the RuleAugmentedReplayBuffer class exactly as it appears in the WS file
+class RuleAugmentedReplayBuffer(ReplayBuffer):
+    """Extends ReplayBuffer to also store rule-suggested actions"""
+
+    def __init__(
+        self,
+        buffer_size,
+        observation_space,
+        action_space,
+        device,
+        handle_timeout_termination=True,
+    ):
+        super().__init__(
+            buffer_size,
+            observation_space,
+            action_space,
+            device,
+            handle_timeout_termination=handle_timeout_termination,
+        )
+        # Add buffer for rule suggestions - initialize with None (-1 as sentinel value)
+        self.rule_suggestions = np.full((self.buffer_size,), -1, dtype=np.int8)
+
+    def add(self, obs, next_obs, actions, rewards, dones, infos, rule_suggestions=None):
+        # Batch operations instead of loop
+        batch_size = len(obs)
+        indices = np.arange(self.pos, self.pos + batch_size) % self.buffer_size
+
+        # Use NumPy's vectorized operations
+        self.observations[indices] = np.array(obs)
+        self.next_observations[indices] = np.array(next_obs)
+        self.actions[indices] = np.array(actions)
+        self.rewards[indices] = np.array(rewards)
+        self.dones[indices] = np.array(dones)
+
+        if rule_suggestions is not None:
+            self.rule_suggestions[indices] = np.array(
+                [rs if rs is not None else -1 for rs in rule_suggestions]
+            )
+
+        self.pos = (self.pos + batch_size) % self.buffer_size
+        self.full = self.full or self.pos == 0
+
+    def sample(self, batch_size):
+        """Sample data and also return rule suggestions"""
+        # Call the parent's sample method to get the base fields
+        batch = super().sample(batch_size)
+
+        # Generate our own batch indices
+        upper_bound = self.buffer_size if self.full else self.pos
+        batch_inds = np.random.randint(0, upper_bound, size=batch_size)
+
+        # Get rule suggestions for the sampled indices
+        rule_suggestions = self.rule_suggestions[batch_inds]
+        # Convert -1 back to None for consistency
+        rule_suggestions_list = [None if r == -1 else r for r in rule_suggestions]
+
+        # Create a new namedtuple with all the fields including rule_suggestions
+        return RuleAugmentedReplayBufferSamples(
+            observations=batch.observations,
+            actions=batch.actions,
+            next_observations=batch.next_observations,
+            dones=batch.dones,
+            rewards=batch.rewards,
+            rule_suggestions=rule_suggestions_list,
+        )
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, n_keys, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
-            env = gym.wrappers.FlattenObservation(gym.wrappers.FilterObservation(env, filter_keys=['image', 'direction']))
+            env = gym.make(env_id, n_keys=n_keys)
+            env = gym.wrappers.FlattenObservation(
+                gym.wrappers.FilterObservation(env, filter_keys=["image", "direction"])
+            )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
         return env
 
     return thunk
+
 
 def _plot_pmfs(
     pmfs_rules, pmfs, combined_pmfs, action_index, n_categories, alpha, title_prefix
@@ -76,35 +159,41 @@ def _plot_pmfs(
     combined_pmfs = combined_pmfs.cpu().detach().numpy()
 
     # Extract the PMFs for the specified action
-    rule_pmf = pmfs_rules[0, action_index]
-    network_pmf = pmfs[0, action_index]
-    combined_pmf = combined_pmfs[0, action_index]
+    rule_pmf = pmfs_rules[0]
+    network_pmf = pmfs[action_index]
+    combined_pmf = combined_pmfs[action_index]
 
     # Map the range 0 to 51 to 0 to 1
-    x = np.linspace(0, 1, n_categories)
+    x = np.linspace(Args.v_min, Args.v_max, n_categories)
     # Create subplots
     _, axs = plt.subplots(1, 3, figsize=(15, 5))
 
     # Plot the rule-based PMF
     axs[0].bar(x, rule_pmf, label="Rule PMF", color="skyblue")
-    axs[0].set_title(f"{title_prefix} Rule PMF - Action {action_index} - alpha={alpha}")
-    axs[0].set_xlim(0, 1)
+    axs[0].set_title(
+        f"{title_prefix} Rule PMF - Action {action_index} - alpha={alpha:.2f}"
+    )
+    axs[0].set_xlim(Args.v_min - 0.05, Args.v_max + 0.05)
     axs[0].set_xlabel("Return")
     axs[0].set_ylabel("Probability")
     axs[0].legend()
 
     # Plot the neural network PMF
     axs[1].bar(x, network_pmf, label="Network PMF", color="salmon")
-    axs[1].set_title(f"{title_prefix} Network PMF - Action {action_index} - alpha={alpha}")
-    axs[1].set_xlim(0, 1)
+    axs[1].set_title(
+        f"{title_prefix} Network PMF - Action {action_index} - alpha={alpha:.2f}"
+    )
+    axs[1].set_xlim(Args.v_min - 0.05, Args.v_max + 0.05)
     axs[1].set_xlabel("Return")
     axs[1].set_ylabel("Probability")
     axs[1].legend()
 
     # Plot the combined PMF
     axs[2].bar(x, combined_pmf, label="Combined PMF", color="lightgreen")
-    axs[2].set_title(f"{title_prefix} Combined PMF - Action {action_index} - alpha={alpha}")
-    axs[2].set_xlim(0, 1)
+    axs[2].set_title(
+        f"{title_prefix} Combined PMF - Action {action_index} - alpha={alpha:.2f}"
+    )
+    axs[2].set_xlim(Args.v_min - 0.05, Args.v_max + 0.05)
     axs[2].set_xlabel("Return")
     axs[2].set_ylabel("Probability")
     axs[2].legend()
@@ -112,7 +201,9 @@ def _plot_pmfs(
     plt.tight_layout()
     if not os.path.exists("plots/"):
         os.makedirs("plots/")
-    plt.savefig(f"plots/{title_prefix}_pmfs_{action_index}_{alpha:.2f}.png")
+    plt.savefig(
+        f"plots/{title_prefix}_pmfs_{action_index}_{alpha:.2f}_{datetime.now().strftime('%Y_%m_%d-%H_%M_%S')}.png"
+    )
     plt.close()
 
 
@@ -131,8 +222,11 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(128, self.n * n_atoms),
         )
-        self.rule_pmf = self.rule_distribution().view(1, 1, self.n_atoms) # Pre-compute rule PMF
-                # Define action mappings (adjust as needed based on your environment)
+        self.rule_pmf = self.rule_distribution()  # Pre-compute rule PMF
+        # self.plot_rule_distribution()  # Plot the rule PMF
+        # assfafsa
+        self.plots = {0.99: False, 0.75: False, 0.5: False, 0.25: False, 0.05: False}
+        # Define action mappings (adjust as needed based on your environment)
         self.action_map = {
             "left": 0,  # Turn left
             "right": 1,  # Turn right
@@ -141,92 +235,87 @@ class QNetwork(nn.Module):
             "toggle": 5,  # Open door
         }
 
-        self.action_stats = {
-            "rule_actions_count": 0,
-            "network_actions_count": 0,
-            "rule_actions": [],
-            "network_actions": [],
-            "global_step": [],
-            "rule_influence": [],
-            "epsilon": []
-        }
-
-
-    # def get_action(self, x, action=None):
-    #     logits = self.network(x)
-    #     # probability mass function for each action
-    #     pmfs = torch.softmax(logits.view(len(x), self.n, self.n_atoms), dim=2)
-    #     # Only use the image part
-    #     x = x[:, :7 * 7 * 3]
-    #     observables = get_observables(x)
-    #     rule_mask = self.get_rule_mask(observables).unsqueeze(2)
-    #     rule_pmfs = rule_mask * self.rule_pmf
-    #     combined_pmfs = (1 - epsilon) * pmfs + epsilon * rule_pmfs
-    #     q_values = (combined_pmfs * self.atoms).sum(2)
-    #     if action is None:
-    #         action = torch.argmax(q_values, 1)
-    #     return action, combined_pmfs[torch.arange(len(x)), action]
-    
-    
     def rule_distribution(self):
-        """More moderate rule distribution"""
-        # Use more moderate parameter values
-        rule_shift = 0.4  # Move sigmoid center point
-        rule_scale = 5.0  # Less extreme scale
-        
-        # Compute sigmoid over atoms with moderate parameters
-        s = torch.sigmoid(rule_scale * (self.atoms - rule_shift))
-        rule_pmf = s / s.sum()
-        
-        return rule_pmf
-    
+        """
+        Hybrid rule distribution: baseline 0.05 everywhere, smooth peak up to 0.5.
+        The peak is at the rightmost atom (highest return).
+        """
+        n = self.n_atoms
+        device = self.atoms.device
+
+        # Baseline
+        baseline = 0.0
+        weights = torch.full((n,), baseline, device=device)
+
+        # Gaussian-like peak at the rightmost atom
+        peak_height = 0.8
+        peak_pos = n - 1  # rightmost
+        peak_width = n // 16   # controls spread; adjust as needed
+
+        # Add the peak
+        idxs = torch.arange(n, device=device)
+        peak = torch.exp(-0.5 * ((idxs - peak_pos) / peak_width) ** 2)
+        peak = peak / peak.max() * (peak_height - baseline)
+        weights += peak
+
+        return weights.view(1, 1, n)
+
     def plot_rule_distribution(self):
         rule_pmf_np = self.rule_pmf.squeeze().numpy()  # Convert to NumPy for plotting
         plt.figure(figsize=(8, 6))
-        x = np.linspace(0, 1, 51)
-        plt.bar(x, rule_pmf_np, width=(1 / 51) * 0.8)
+        x = np.linspace(Args.v_min, Args.v_max, self.n_atoms)
+        plt.bar(x, rule_pmf_np, width=(1 / Args.n_atoms) * 0.8)
         plt.xlabel("Return Value (Atom)")
         plt.ylabel("Probability")
-        plt.xlim(-0.05, 1.05)
-        plt.grid(axis='y', alpha=0.75)
-        plt.savefig(f"plots/rule_pmf_v3_{Args.sigmoid_shift}_{Args.sigmoid_scale}.png")  # Save the plot
+        plt.xlim(Args.v_min - 0.05, Args.v_max + 0.05)
+        plt.grid(axis="y", alpha=0.75)
+        plt.savefig(f"plots/rule_pmf_{Args.run_code}.png")  # Save the plot
         plt.close()
 
-
-    def get_action(self, x, action=None):
+    def get_action(self, x, stored_rule_actions=None, action=None, skip=False):
         """Simplified action selection with rule guidance"""
         batch_size = len(x)
-        
+
         # Get distributional Q-values from the network
         logits = self.network(x)
         pmfs = torch.softmax(logits.view(batch_size, self.n, self.n_atoms), dim=2)
-        
+
+        if skip:
+            q_values = (pmfs * self.atoms).sum(2)
+            if action is None:
+                action = torch.argmax(q_values, 1)
+            return action, pmfs[torch.arange(len(x)), action]
+
         # Get rule suggestions (could be None for some samples)
-        rule_actions = self._apply_rules_batch(self.get_observables(x[:, 4:]))
-        
+        rule_actions = (
+            self._apply_rules_batch(self.get_observables(x[:, 4:]))
+            if stored_rule_actions is None
+            else stored_rule_actions
+        )
+
         # Apply rule influence through a more efficient tensor operation
         rule_influence = torch.ones_like(pmfs)
-        
+
         # Set rule influence for specific actions where rules apply
         for i, act in enumerate(rule_actions):
             if act is not None:
                 # Scale up probability for the suggested action
-                rule_influence[i, act] = self.rule_pmf
-        
+                rule_influence[i, act] = self.rule_pmf[0, 0] + 1
+
         combined_pmfs = pmfs * rule_influence
         # Renormalize
         combined_pmfs = combined_pmfs / combined_pmfs.sum(dim=2, keepdim=True)
-        
+
         q_values = (combined_pmfs * self.atoms).sum(2)
         if action is None:
             action = torch.argmax(q_values, dim=1)
-        
-        return action, combined_pmfs[torch.arange(len(x)), action]
+
+        return action, combined_pmfs[torch.arange(len(x)), action], rule_actions
 
     def _apply_rules_batch(self, batch_observables):
         """Apply rules to each environment observation in the batch"""
         rule_actions = []
-        
+
         for observables in batch_observables:
             # Parse observables
             keys = [o for o in observables if o[0] == "key"]
@@ -346,7 +435,7 @@ class QNetwork(nn.Module):
         """
         Improved navigation helper that avoids walls when moving towards a target
 
-        Args:   
+        Args:
             target_x: Relative x-coordinate of the target
             target_y: Relative y-coordinate of the target
             walls: List of wall observations with their positions
@@ -387,68 +476,67 @@ class QNetwork(nn.Module):
                 return self.action_map["right"]
             else:
                 return self.action_map["left"]
-            
+
+    # Optimize observation processing with NumPy
     def get_observables(self, raw_obs_batch):
         """
-        Vectorized version of get_observables that processes entire batch at once
-        Args:
-            raw_obs_batch: shape (batch_size, H*W*C) or (batch_size, H, W, C)
-        Returns:
-            List of observation lists for each item in batch
+        Highly optimized version of get_observables that processes entire batch at once
         """
-        DOOR_STATES = ["open", "closed", "locked"]
-        view_size = 7
-        mid = (view_size - 1) // 2
         batch_size = raw_obs_batch.shape[0]
-        
+
+        # Convert to NumPy once if needed
         if isinstance(raw_obs_batch, torch.Tensor):
             raw_obs_batch = raw_obs_batch.cpu().numpy()
-        
-        # Reshape to (batch_size, H, W, C)
-        img_batch = raw_obs_batch.reshape(batch_size, view_size, view_size, 3)
-        
-        # Pre-compute offsets once
-        i, j = np.meshgrid(np.arange(view_size), np.arange(view_size), indexing='ij')
-        offset_x = i - mid
-        offset_y = np.abs(j - (view_size - 1))
-        
+
+        # Reshape efficiently with pre-computed shape
+        try:
+            img_batch = raw_obs_batch.reshape(batch_size, VIEW_SIZE, VIEW_SIZE, 3)
+        except ValueError:
+            # Handle case where dimensions don't match by taking only the image part
+            img_batch = raw_obs_batch[:, : VIEW_SIZE * VIEW_SIZE * 3].reshape(
+                batch_size, VIEW_SIZE, VIEW_SIZE, 3
+            )
+
+        # Process batch items in parallel
         batch_obs = []
-        
-        # Process each batch item
+
+        # Process each batch item with minimal Python overhead
         for img in img_batch:
             obs = []
             item_first = img[..., 0]
             item_second = img[..., 1]
-            
-            # Find all object positions at once
+            item_third = img[..., 2]
+
+            # Find all object positions efficiently with NumPy
             key_positions = np.where(item_first == 5)
             door_positions = np.where(item_first == 4)
             goal_positions = np.where(item_first == 8)
             wall_positions = np.where(item_first == 2)
-            
-            # Process keys
+
+            # Vectorized processing for keys
             for k_i, k_j in zip(*key_positions):
                 color = IDX_TO_COLOR.get(item_second[k_i, k_j])
-                obs.append(("key", [color, offset_x[k_i, k_j], offset_y[k_i, k_j]]))
-                if k_i == mid and k_j == view_size - 1:
+                obs.append(("key", [color, OFFSETS_X[k_i, k_j], OFFSETS_Y[k_i, k_j]]))
+                if k_i == MID_POINT and k_j == VIEW_SIZE - 1:
                     obs.append(("carryingKey", [color]))
-            
-            # Process doors
+
+            # Vectorized processing for doors
             for d_i, d_j in zip(*door_positions):
                 color = IDX_TO_COLOR.get(item_second[d_i, d_j])
-                obs.append(("door", [color, offset_x[d_i, d_j], offset_y[d_i, d_j]]))
-                obs.append((DOOR_STATES[2], [color]))
-            
-            # Process goals
+                obs.append(("door", [color, OFFSETS_X[d_i, d_j], OFFSETS_Y[d_i, d_j]]))
+                # Get the door state from the third channel
+                door_state_idx = int(item_third[d_i, d_j])
+                obs.append((DOOR_STATES[door_state_idx], [color]))
+
+            # Vectorized processing for goals and walls
             for g_i, g_j in zip(*goal_positions):
-                obs.append(("goal", [offset_x[g_i, g_j], offset_y[g_i, g_j]]))
-            
-            # Process walls
+                obs.append(("goal", [OFFSETS_X[g_i, g_j], OFFSETS_Y[g_i, g_j]]))
+
             for w_i, w_j in zip(*wall_positions):
-                obs.append(("wall", [offset_x[w_i, w_j], offset_y[w_i, w_j]]))
-                
+                obs.append(("wall", [OFFSETS_X[w_i, w_j], OFFSETS_Y[w_i, w_j]]))
+
             batch_obs.append(obs)
-        
+
         return batch_obs
 
 
@@ -465,7 +553,10 @@ if __name__ == "__main__":
     run_name = f"C51rtv3_{args.env_id}__seed{args.seed}__{start_datetime}"
     if args.track:
         import wandb
-        wandb.tensorboard.patch(root_logdir=f"C51rtv3/runs_rules_training/{run_name}/train")
+
+        wandb.tensorboard.patch(
+            root_logdir=f"C51rtv3/runs_rules_training/{run_name}/train"
+        )
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -474,7 +565,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rtv3_{args.sigmoid_shift}_{args.sigmoid_scale}_{args.exploration_fraction}_{args.run_code}",
+            group=f"C51rtv3_{args.exploration_fraction}_{args.run_code}",
         )
     writer = SummaryWriter(f"C51rtv3/runs_rules_training/{run_name}/train")
     writer.add_text(
@@ -483,10 +574,12 @@ if __name__ == "__main__":
         % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
     episodes_returns = []
-
+    episodes_lengths = []
 
     # TRY NOT TO MODIFY: seeding
-    print(f'File: {os.path.basename(__file__)}, using seed {args.seed} and exploration fraction {args.exploration_fraction}')
+    print(
+        f"File: {os.path.basename(__file__)}, using seed {args.seed} and exploration fraction {args.exploration_fraction}"
+    )
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -496,7 +589,9 @@ if __name__ == "__main__":
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [
-            make_env(args.env_id, args.seed + i, i, args.capture_video, run_name)
+            make_env(
+                args.env_id, args.n_keys, args.seed + i, i, args.capture_video, run_name
+            )
             for i in range(args.num_envs)
         ]
     )
@@ -515,7 +610,8 @@ if __name__ == "__main__":
     ).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
-    rb = ReplayBuffer(
+    # Use RuleAugmentedReplayBuffer instead of ReplayBuffer
+    rb = RuleAugmentedReplayBuffer(
         args.buffer_size,
         envs.single_observation_space,
         envs.single_action_space,
@@ -524,15 +620,23 @@ if __name__ == "__main__":
     )
     start_time = time.time()
 
-    global epsilon
-
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
     print_step = args.print_step
     print(
-        f"Starting training for {args.total_timesteps} timesteps on {args.env_id}, with print_step={print_step}"
+        f"Starting training for {args.total_timesteps} timesteps on {args.env_id} with {args.n_keys} keys, with print_step={print_step}"
     )
-    for global_step in tqdm(range(args.total_timesteps), colour="green"):
+
+    # Create tqdm progress bar
+    progress_bar = tqdm(
+        range(args.total_timesteps),
+        desc=f"Training seed {args.seed}",
+        colour="blue",
+        miniters=5000,
+        maxinterval=10,
+    )
+
+    for global_step in progress_bar:
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(
             args.start_e,
@@ -541,15 +645,23 @@ if __name__ == "__main__":
             global_step,
         )
         if random.random() < epsilon:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions = np.array(
+                [envs.single_action_space.sample() for _ in range(envs.num_envs)]
+            )
+            # Get rule suggestions even for random actions, just like in WS version
+            rule_actions = q_network._apply_rules_batch(
+                q_network.get_observables(torch.Tensor(obs).float().to(device)[:, 4:])
+            )
         else:
-            actions, pmf = q_network.get_action(
-                torch.Tensor(obs).float().to(device),
+            # Updated to use the new get_action method that returns rule_actions
+            actions, pmf, rule_actions = q_network.get_action(
+                torch.Tensor(obs).float().to(device), skip=False
             )
             if isinstance(actions, torch.Tensor):
                 actions = actions.cpu().numpy()
             else:
                 actions = np.array([actions])
+
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
@@ -557,25 +669,28 @@ if __name__ == "__main__":
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
+                    writer.add_scalar(
+                        "episodic_return", float(info["episode"]["r"][0]), global_step
+                    )
+                    writer.add_scalar(
+                        "episodic_length", float(info["episode"]["l"][0]), global_step
+                    )
+                    episodes_returns.append(float(info["episode"]["r"][0]))
+                    episodes_lengths.append(float(info["episode"]["l"][0]))
                     if global_step >= print_step:
+                        mean_ep_return = np.mean(episodes_returns[-args.print_step :])
+                        mean_ep_lengths = np.mean(episodes_lengths[-args.print_step :])
                         tqdm.write(
-                            f"global_step={global_step}, episodic_return={info['episode']['r'][0]}, episodic_length={info['episode']['l'][0]}, exploration_rate={epsilon:.4f}"
+                            f"global_step={global_step}, episodic_return_mean_last_print_step={mean_ep_return}, episodic_length_mean_last_print_step={mean_ep_lengths}, exploration_rate={epsilon:.2f}"
                         )
                         print_step += args.print_step
-                    writer.add_scalar(
-                        "episodic_return", info["episode"]["r"], global_step
-                    )
-                    writer.add_scalar(
-                        "episodic_length", info["episode"]["l"], global_step
-                    )
-                    episodes_returns.append(info["episode"]["r"])
 
-        # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
+        # Update to include rule_actions in rb.add
         real_next_obs = next_obs.copy()
         for idx, trunc in enumerate(truncations):
             if trunc:
                 real_next_obs[idx] = infos["final_observation"][idx]
-        rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
+        rb.add(obs, real_next_obs, actions, rewards, terminations, infos, rule_actions)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -586,9 +701,11 @@ if __name__ == "__main__":
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
                     _, next_pmfs = target_network.get_action(
-                        data.next_observations.float(),
+                        data.next_observations.float(), skip=True
                     )
-                    next_atoms = data.rewards + args.gamma * target_network.atoms * (1 - data.dones)
+                    next_atoms = data.rewards + args.gamma * target_network.atoms * (
+                        1 - data.dones
+                    )
                     # projection
                     delta_z = target_network.atoms[1] - target_network.atoms[0]
                     tz = next_atoms.clamp(args.v_min, args.v_max)
@@ -605,10 +722,18 @@ if __name__ == "__main__":
                         target_pmfs[i].index_add_(0, l[i].long(), d_m_l[i])
                         target_pmfs[i].index_add_(0, u[i].long(), d_m_u[i])
 
-                _, old_pmfs = q_network.get_action(
-                    data.observations.float(), data.actions.flatten()
+                # Update to use get_action_with_stored_rules similar to WS version
+                _, old_pmfs, _ = q_network.get_action(
+                    data.observations.float(),
+                    stored_rule_actions=data.rule_suggestions,
+                    action=data.actions.flatten(),
+                    skip=False,
                 )
-                loss = (-(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(-1)).mean()
+                loss = (
+                    -(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(
+                        -1
+                    )
+                ).mean()
 
                 if global_step % 10000 == 0:
                     # print(f"global_step={global_step}, loss={loss.item()}")
@@ -633,15 +758,19 @@ if __name__ == "__main__":
                 target_network.load_state_dict(q_network.state_dict())
 
     plt.plot(episodes_returns)
-    plt.title(f'C51rtv3 on {args.env_id} - Return over {args.total_timesteps} timesteps')
+    plt.title(
+        f"C51rtv3 on {args.env_id} - Return over {args.total_timesteps} timesteps"
+    )
     plt.xlabel("Episode")
     plt.ylabel("Return")
     plt.grid(True)
-    path = f'C51rtv3/{args.env_id}_c51rtv3_{args.total_timesteps}_{start_datetime}'
+    path = f"C51rtv3/{args.env_id}_c51rtv3_{args.total_timesteps}_{start_datetime}"
     if not os.path.exists("C51rtv3/"):
         os.makedirs("C51rtv3/")
     os.makedirs(path)
-    plt.savefig(f"{path}/{args.env_id}_c51rtv3_{args.total_timesteps}_{start_datetime}.png")
+    plt.savefig(
+        f"{path}/{args.env_id}_c51rtv3_{args.total_timesteps}_{start_datetime}.png"
+    )
     plt.close()
     with open(f"{path}/c51rtv3_args.txt", "w") as f:
         for key, value in vars(args).items():
@@ -659,7 +788,8 @@ if __name__ == "__main__":
         print(f"model saved to {model_path}")
         from baseC51.c51_eval import QNetwork as QNetworkEval
         from c51rtv3_eval import evaluate
-        eval_episodes=100000
+
+        eval_episodes = 100000
         episodic_returns = evaluate(
             model_path,
             make_env,
@@ -668,26 +798,37 @@ if __name__ == "__main__":
             run_name=f"{run_name}-eval",
             Model=QNetworkEval,
             device=device,
-            epsilon=0
+            epsilon=0,
         )
         writer = SummaryWriter(f"C51rtv3/runs_rules_training/{run_name}/eval")
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("episodic_return", episodic_return, idx)
 
         plt.plot(episodic_returns)
-        plt.title(f'C51rtv3 Eval on {args.env_id} - Return over {eval_episodes} episodes')
+        plt.title(
+            f"C51rtv3 Eval on {args.env_id} - Return over {eval_episodes} episodes"
+        )
         plt.xlabel("Episode")
         plt.ylabel("Return")
         plt.ylim(0, 1)
         plt.grid(True)
-        plt.savefig(f"{path}/{args.env_id}_c51rtv3_{eval_episodes}_{start_datetime}_eval.png")
+        plt.savefig(
+            f"{path}/{args.env_id}_c51rtv3_{eval_episodes}_{start_datetime}_eval.png"
+        )
 
         if args.upload_model:
             from cleanrl_utils.huggingface import push_to_hub
 
             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
             repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "C51rtv3", f"runs/{run_name}", f"videos/{run_name}-eval")
+            push_to_hub(
+                args,
+                episodic_returns,
+                repo_id,
+                "C51rtv3",
+                f"runs/{run_name}",
+                f"videos/{run_name}-eval",
+            )
 
     envs.close()
     writer.close()

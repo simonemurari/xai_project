@@ -36,13 +36,13 @@ OFFSETS_X, OFFSETS_Y = np.meshgrid(
 )
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, n_keys, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
+            env = gym.make(env_id, n_keys=n_keys)
             env = gym.wrappers.FlattenObservation(
                 gym.wrappers.FilterObservation(env, filter_keys=["image", "direction"])
             )
@@ -560,6 +560,7 @@ def train_c51(args, seed):
         [
             make_env(
                 args.env_id,
+                args.n_keys,
                 seed,
                 i,
                 args.capture_video and i == 0,
@@ -576,7 +577,7 @@ def train_c51(args, seed):
         envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max
     ).to(device)
     optimizer = optim.Adam(
-        q_network.parameters(), lr=args.learning_rate, eps=0.01 / args.batch_size
+        q_network.parameters(), lr=args.learning_rate
     )
     target_network = QNetwork(
         envs, n_atoms=args.n_atoms, v_min=args.v_min, v_max=args.v_max
@@ -595,7 +596,9 @@ def train_c51(args, seed):
     # Start the game
     obs, _ = envs.reset(seed=seed)
     print_step = args.print_step
-    print(f"Starting training with seed {seed}, device {device}")
+    print(
+        f"Starting training for {args.total_timesteps} timesteps on {args.env_id} with {args.n_keys} keys, with print_step={print_step}"
+    )
 
     # Pre-allocate observation tensor for efficiency
     obs_tensor = torch.zeros(
@@ -726,8 +729,9 @@ def train_c51(args, seed):
                     )
 
                 # Optimize more efficiently
-                optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
+                optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(list(q_network.parameters()), 10)
                 optimizer.step()
 
                 # Update target network when needed
