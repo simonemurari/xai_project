@@ -98,6 +98,7 @@ if __name__ == "__main__":
     )
     episodes_returns = []
     episodes_lengths = []
+    len_episodes_returns = 0
     
     # TRY NOT TO MODIFY: seeding
     print(f'File: {os.path.basename(__file__)}, using seed {args.seed} and exploration fraction {args.exploration_fraction}')
@@ -105,8 +106,7 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
-    torch.backends.cudnn.benchmark = False
-    print_mr = [False, False, False]
+    # torch.backends.cudnn.benchmark = False
 
     device = args.device
 
@@ -152,14 +152,25 @@ if __name__ == "__main__":
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    writer.add_scalar("episodic_return", info["episode"]["r"][0], global_step)
-                    writer.add_scalar("episodic_length", info["episode"]["l"][0], global_step)
-                    episodes_returns.append(info["episode"]["r"])
-                    episodes_lengths.append(info["episode"]["l"])
+                    writer.add_scalar(
+                        "episodic_return", float(info["episode"]["r"][0]), global_step
+                    )
+                    writer.add_scalar(
+                        "episodic_length", float(info["episode"]["l"][0]), global_step
+                    )
+                    episodes_returns.append(float(info["episode"]["r"][0]))
+                    episodes_lengths.append(float(info["episode"]["l"][0]))
                     if global_step >= print_step:
-                        mean_ep_return = np.mean(episodes_returns[-args.print_step:])
-                        mean_ep_lengths = np.mean(episodes_lengths[-args.print_step:])
-                        tqdm.write(f"global_step={global_step}, episodic_return_mean_last_print_step={mean_ep_return}, episodic_length_mean_last_print_step={mean_ep_lengths}, exploration_rate={epsilon:.2f}")
+                        old_len_episodes_returns = len_episodes_returns
+                        len_episodes_returns = len(episodes_returns)
+                        print_num_eps = len_episodes_returns - old_len_episodes_returns
+                        mean_ep_return = np.mean(episodes_returns[-print_num_eps:])
+                        mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps:])
+                        tot_mean_return = np.mean(episodes_returns)
+                        tot_mean_length = np.mean(episodes_lengths)
+                        tqdm.write(
+                            f"global_step={global_step}, mean_return_last_{print_num_eps}_episodes={mean_ep_return}, tot_mean_ret={tot_mean_return}, mean_length_last_{print_num_eps}_episodes={mean_ep_lengths}, tot_mean_len={tot_mean_length}, epsilon={epsilon:.2f}"
+                        )
                         print_step += args.print_step
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`

@@ -15,13 +15,13 @@ class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
 
-    seed: int = 6
+    seed: int = 47235
     """seed of the experiment"""
 
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "16x16_1key_v2"
+    run_code: str = "16x16_1key"
     """the group of the run"""
 
     torch_deterministic: bool = True
@@ -57,19 +57,21 @@ class Args:
 
 
     # C51 Algorithm specific arguments
-    size_env: int = 8
+    size_env: int = 16
     """the size of the environment (5, 6, 8, 16)"""
 
     n_keys: int = 1
     """the number of keys in the environment"""
 
-    env_id: str = f"MiniGrid-DoorKey-{size_env}x{size_env}-v0"
-    """the id of the environment"""
+    @property
+    def env_id(self) -> str:
+        """the id of the environment"""
+        return f"MiniGrid-DoorKey-{self.size_env}x{self.size_env}-v0"
 
-    total_timesteps: int = 3_000_000
+    total_timesteps: int = 4_000_000
     """total timesteps of the experiments"""
 
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 2e-4
     """the learning rate of the optimizer"""
 
     n_atoms: int = 51
@@ -81,29 +83,29 @@ class Args:
     v_max: float = 1
     """the return upper bound"""
 
-    buffer_size: int = 500_000
+    buffer_size: int = 1_500_000
     """the replay memory buffer size"""
 
     gamma: float = 0.99
     """the discount factor gamma"""
 
-    target_network_frequency: int = 1000
+    target_network_frequency: int = 5000
     """the timesteps it takes to update the target network"""
 
-    batch_size: int = 128
+    batch_size: int = 256
     """the batch size of sample from the replay memory"""
 
     start_e: float = 1
     """the starting epsilon for exploration"""
 
-    end_e: float = 0.05
+    end_e: float = 0.3
     """the ending epsilon for exploration"""
 
-    exploration_fraction: float = 0.3
+    exploration_fraction: float = 0.6
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
 
-    learning_starts: int = 50_000
+    learning_starts: int = 100_000
     """timestep to start learning"""
 
-    train_frequency: int = 2
+    train_frequency: int = 4
     """the frequency of training"""

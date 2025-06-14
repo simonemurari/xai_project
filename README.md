@@ -27,13 +27,16 @@ In this repository you can find the code to run the C51 algorithm and its variat
    conda activate xai-project
    pip install -r requirements.txt
    ```
-
    Or you can install `uv` and do `uv sync`.
-2. **Configure wandb (optional)** \
+
+2. **Modify the default doorkey.py file** \
+   In order to use MiniGrid-DoorKey maps with more than 1 key you need to substitute the `doorkey.py` file in `.venv/lib/python3.12/site-packages/minigrid/envs` with the `doorkey.py` in the main folder of this repository
+
+3. **Configure wandb (optional)** \
    If you want to use wandb tracking, create a `.env` file in the repository root and set the proper environment variables (WANDB_KEY, WANDB_PROJECT_NAME, WANDB_ENTITY).
 
-3. **Configure the config.py file** \
+4. **Configure the config.py file** \
    In the file convergence_8x8_parameters you can find the parameters that will make all algorithms converge in the 8x8 map.
 
-4. **Run the scripts** \
+5. **Run the scripts** \
    To run the different scripts just do e.g.: ```python baseC51/c51.py``` or ```uv run baseC51/c51.py``` if you are using `uv` 
