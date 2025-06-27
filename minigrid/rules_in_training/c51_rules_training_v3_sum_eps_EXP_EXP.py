@@ -728,6 +728,7 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
+    print(f'obs={obs}, obs.shape={obs.shape}, obs.dtype={obs.dtype}')
     print_step = args.print_step
     print(
         f"Starting training for {args.total_timesteps} timesteps on {args.env_id} with {args.n_keys} keys, with print_step={print_step}"

@@ -21,14 +21,14 @@ class Args:
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "16x16_1key"
+    run_code: str = "DeliverCoffeeAndMail_TEST_v21"
     """the group of the run"""
 
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
 
-    # device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    device: str = "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    # device: str = "cpu"
     # """the device to run the experiment on (set it to cuda if using GPU)"""
 
     track: bool = True
@@ -52,60 +52,57 @@ class Args:
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
-    print_step: int = 200_000
+    print_step: int = 25_000
     """the frequency to printout the training progress"""
 
 
     # C51 Algorithm specific arguments
-    size_env: int = 16
-    """the size of the environment (5, 6, 8, 16)"""
-
-    n_keys: int = 1
-    """the number of keys in the environment"""
+    task: str = "DeliverCoffeeAndMail" #DeliverCoffee or DeliverCoffeeAndMail
+    """the task to run the experiments on"""
 
     @property
     def env_id(self) -> str:
         """the id of the environment"""
-        return f"MiniGrid-DoorKey-{self.size_env}x{self.size_env}-v0"
+        return f"gym_subgoal_automata:OfficeWorld{self.task}-v0"
 
-    total_timesteps: int = 4_000_000
+    total_timesteps: int = 600_000
     """total timesteps of the experiments"""
 
-    learning_rate: float = 2e-4
+    learning_rate: float = 5e-4
     """the learning rate of the optimizer"""
 
     n_atoms: int = 51
     """the number of atoms"""
 
-    v_min: float = -1
+    v_min: float = -10
     """the return lower bound"""
 
-    v_max: float = 1
+    v_max: float = 2
     """the return upper bound"""
 
-    buffer_size: int = 1_500_000
+    buffer_size: int = 100_000
     """the replay memory buffer size"""
 
-    gamma: float = 0.99
+    gamma: float = 0.95
     """the discount factor gamma"""
 
-    target_network_frequency: int = 5000
+    target_network_frequency: int = 1000
     """the timesteps it takes to update the target network"""
 
-    batch_size: int = 256
+    batch_size: int = 32
     """the batch size of sample from the replay memory"""
 
     start_e: float = 1
     """the starting epsilon for exploration"""
 
-    end_e: float = 0.3
+    end_e: float = 0.05
     """the ending epsilon for exploration"""
 
     exploration_fraction: float = 0.6
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
 
-    learning_starts: int = 100_000
+    learning_starts: int = 5000
     """timestep to start learning"""
 
-    train_frequency: int = 4
+    train_frequency: int = 1
     """the frequency of training"""

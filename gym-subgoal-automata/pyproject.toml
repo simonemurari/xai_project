@@ -1,0 +1,7 @@
+[project]
+name = "gym-subgoal-automata"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">= 3.6, < 3.8"
+dependencies = []

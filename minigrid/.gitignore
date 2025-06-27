@@ -31,8 +31,5 @@ run_5_seeds_delayed.sh
 run_1_seed_ALL.sh
 run_5_seeds_ALL.sh
 
-rules_in_training/c51_rules_training_v3_sum_eps_EXP_EXP_test.py
-rules_in_training/c51_rules_training_v3_sum_2x_eps.py
 dqn_rules.py
 config_dqn.py
-find_params.sh
