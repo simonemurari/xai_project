@@ -342,15 +342,9 @@ if __name__ == "__main__":
                     mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps:])
                     tot_mean_return = np.mean(episodes_returns)
                     tot_mean_length = np.mean(episodes_lengths)
-                    if (
-                        global_step / args.total_timesteps >= 0.45
-                        and mean_ep_return <= 0.1
-                        or
-                        global_step / args.total_timesteps >= 0.1
-                        and mean_ep_return <= -10.0
-                        or
-                        global_step / args.total_timesteps >= 0.30
-                        and mean_ep_return <= -2.0
+                    if (print_num_eps >= 3500 and mean_ep_return < 0.1) or (
+                        mean_ep_return < -5
+                        and global_step / args.total_timesteps >= 0.5
                     ):
                         tqdm.write(
                             f"Stopping early after {(global_step / args.total_timesteps) * 100:.2f}% of timesteps"

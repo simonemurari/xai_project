@@ -2,52 +2,45 @@
 import os
 import random
 import time
-from tqdm import tqdm
-import tyro
 import sys
-from datetime import datetime
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from config_dqn import Args
-import gym
-from gym import spaces
+import minigrid
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
-import warnings
+from datetime import datetime
+from tqdm import tqdm
 from dotenv import load_dotenv
+import warnings
 load_dotenv(".env")
 WANDB_KEY = os.getenv("WANDB_KEY")
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 print(
     f"Torch: {torch.__version__}, cuda ON: {torch.cuda.is_available()}, device = {Args.device}"
 )
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+
+def make_env(env_id, seed, n_keys, idx, capture_video, run_name):
     def thunk():
-        env = gym.make(
-            env_id,
-            params={
-                "generation": "random",
-                "environment_seed": seed,
-                "use_one_hot_vector_states": True,
-            },
-        )
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        if isinstance(env.observation_space, spaces.Discrete):
-            n = env.observation_space.n
-            env.observation_space = spaces.Box(
-                low=0.0, high=1.0, shape=(n,), dtype=np.float32
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id, n_keys=n_keys)
+            env = gym.wrappers.FlattenObservation(
+                gym.wrappers.FilterObservation(env, filter_keys=["image", "direction"])
             )
-        if capture_video:
-            if idx == 0:
-                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
-        env.observation_space.seed(seed)
+
         return env
 
     return thunk
@@ -64,6 +57,7 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(128, env.single_action_space.n),
         )
+        self.n = env.single_action_space.n
 
     def forward(self, x):
         return self.network(x)
@@ -77,11 +71,13 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 if __name__ == "__main__":
     start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     args = tyro.cli(Args)
-    run_name = f"OfficeWorld-DQN_{args.env_id}__seed={args.seed}__{start_datetime}"
+    assert args.num_envs == 1, "vectorized envs are not supported at the moment"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
 
-        wandb.tensorboard.patch(root_logdir=f"DQN/runs/{run_name}/train")
+        # wandb.login(key=WANDB_KEY)
+        wandb.tensorboard.patch(root_logdir=f"DQNbase/runs/{run_name}/train")
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -90,9 +86,9 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"OfficeWorld-DQN_{args.exploration_fraction}_{args.run_code}",
+            group=f"DQNbase_{args.exploration_fraction}_{args.run_code}",
         )
-    writer = SummaryWriter(f"DQN/runs/{run_name}/train")
+    writer = SummaryWriter(f"DQNbase/runs/{run_name}/train")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
@@ -101,12 +97,8 @@ if __name__ == "__main__":
     episodes_returns = []
     episodes_lengths = []
     len_episodes_returns = 0
-    print_step = args.print_step
 
-    # TRY NOT TO MODIFY:
-    print(
-        f"File: {os.path.basename(__file__)}, using seed {args.seed} and exploration fraction {args.exploration_fraction}"
-    )
+    # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -116,7 +108,10 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed, 0, args.capture_video, run_name)]
+        [
+            make_env(args.env_id, args.seed + i, args.n_keys, i, args.capture_video, run_name)
+            for i in range(args.num_envs)
+        ]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), (
         "only discrete action space is supported"
@@ -132,15 +127,17 @@ if __name__ == "__main__":
         envs.single_observation_space,
         envs.single_action_space,
         device,
-        handle_timeout_termination=True,
+        handle_timeout_termination=False,
     )
     start_time = time.time()
+    print_step = args.print_step
 
     print(
         f"Starting training for {args.total_timesteps} timesteps on {args.env_id} with print_step={print_step}"
     )
+
     # TRY NOT TO MODIFY: start the game
-    obs = envs.reset()
+    obs, _ = envs.reset(seed=args.seed)
     for global_step in tqdm(range(args.total_timesteps), colour="green"):
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(
@@ -150,59 +147,47 @@ if __name__ == "__main__":
             global_step,
         )
         if random.random() < epsilon:
-            suggested_actions = envs.envs[0].guide_agent()
-            weights = [0.2] * envs.single_action_space.n
-            for action in suggested_actions:
-                weights[action] = 0.8
-            weights = weights / np.sum(weights)
-            actions = np.random.choice(
-                envs.single_action_space.n, size=envs.num_envs, p=weights
+            actions = np.array(
+                [envs.single_action_space.sample() for _ in range(envs.num_envs)]
             )
         else:
-            q_values = q_network(torch.Tensor(obs).float().to(device))
-            suggested_actions = envs.envs[0].guide_agent()
-            weights = [0.2] * envs.single_action_space.n
-            for action in suggested_actions:
-                weights[action] = 0.8
-            q_values = q_values * (1 + (epsilon * torch.Tensor(weights).to(device)))
+            q_values = q_network(torch.Tensor(obs).to(device))
             actions = torch.argmax(q_values, dim=1).cpu().numpy()
 
-        # TRY NOT TO MODIFY: execute the game and log data.True
-        # print(f"global_step={global_step}, actions={actions}, epsilon={epsilon:.2f}")
-        next_obs, rewards, dones, infos = envs.step(actions)
+        # TRY NOT TO MODIFY: execute the game and log data.
+        next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        for info in infos:
-            if "episode" in info.keys():
-                writer.add_scalar(
-                    "episodic_return", info["episode"]["r"], global_step
-                )
-                writer.add_scalar(
-                    "episodic_length", info["episode"]["l"], global_step
-                )
-                writer.add_scalar("epsilon", epsilon, global_step)
-                episodes_returns.append(info["episode"]["r"])
-                episodes_lengths.append(info["episode"]["l"])
-                if global_step >= print_step:
-                    old_len_episodes_returns = len_episodes_returns
-                    len_episodes_returns = len(episodes_returns)
-                    print_num_eps = len_episodes_returns - old_len_episodes_returns
-                    mean_ep_return = np.mean(episodes_returns[-print_num_eps :])
-                    mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps :])
-                    tot_mean_return = np.mean(episodes_returns)
-                    tot_mean_length = np.mean(episodes_lengths)
-                    tqdm.write(
-                        f"global_step={global_step}, mean_return_last_{print_num_eps}_episodes={mean_ep_return}, tot_mean_ret={tot_mean_return}, mean_length_last_{print_num_eps}_episodes={mean_ep_lengths}, tot_mean_len={tot_mean_length}, epsilon={epsilon:.2f}"
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                if info and "episode" in info:
+                    writer.add_scalar(
+                        "episodic_return", float(info["episode"]["r"][0]), global_step
                     )
-                    print_step += args.print_step
-                break
+                    writer.add_scalar(
+                        "episodic_length", float(info["episode"]["l"][0]), global_step
+                    )
+                    episodes_returns.append(float(info["episode"]["r"][0]))
+                    episodes_lengths.append(float(info["episode"]["l"][0]))
+                    if global_step >= print_step:
+                        old_len_episodes_returns = len_episodes_returns
+                        len_episodes_returns = len(episodes_returns)
+                        print_num_eps = len_episodes_returns - old_len_episodes_returns
+                        mean_ep_return = np.mean(episodes_returns[-print_num_eps:])
+                        mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps:])
+                        tot_mean_return = np.mean(episodes_returns)
+                        tot_mean_length = np.mean(episodes_lengths)
+                        tqdm.write(
+                            f"global_step={global_step}, mean_return_last_{print_num_eps}_episodes={mean_ep_return}, tot_mean_ret={tot_mean_return}, mean_length_last_{print_num_eps}_episodes={mean_ep_lengths}, tot_mean_len={tot_mean_length}, epsilon={epsilon:.2f}"
+                        )
+                        print_step += args.print_step
 
-        # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
+        # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
-        # for idx, d in enumerate(dones):
-        #     if d:
-        #         real_next_obs[idx] = infos[idx]["terminal_observation"]
-        rb.add(obs, real_next_obs, actions, rewards, dones, infos)
+        for idx, trunc in enumerate(truncations):
+            if trunc:
+                real_next_obs[idx] = infos["final_observation"][idx]
+        rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
@@ -212,11 +197,17 @@ if __name__ == "__main__":
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
-                    target_max, _ = target_network(data.next_observations.float()).max(dim=1)
+                    target_max, _ = target_network(data.next_observations.float()).max(
+                        dim=1
+                    )
                     td_target = data.rewards.flatten() + args.gamma * target_max * (
                         1 - data.dones.flatten()
                     )
-                old_val = q_network(data.observations.float()).gather(1, data.actions).squeeze()
+                old_val = (
+                    q_network(data.observations.float())
+                    .gather(1, data.actions)
+                    .squeeze()
+                )
                 loss = F.mse_loss(td_target, old_val)
 
                 if global_step % 10000 == 0:
@@ -235,9 +226,15 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
 
-            # update the target network
+            # update target network
             if global_step % args.target_network_frequency == 0:
-                target_network.load_state_dict(q_network.state_dict())
+                for target_network_param, q_network_param in zip(
+                    target_network.parameters(), q_network.parameters()
+                ):
+                    target_network_param.data.copy_(
+                        args.tau * q_network_param.data
+                        + (1.0 - args.tau) * target_network_param.data
+                    )
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

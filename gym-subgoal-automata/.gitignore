@@ -108,6 +108,10 @@ venv.bak/
 wandb/
 C51/
 C51rtv3/
+C51rules/
+C51rulesv2/
+DQNbase/
 DQN/
 find_params.py
 find_params_delay.sh
+run_5_seeds.sh

@@ -21,7 +21,7 @@ class Args:
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "DeliverCoffeeAndMail_TEST_v21"
+    run_code: str = "DeliverCoffeeAndMail_1"
     """the group of the run"""
 
     torch_deterministic: bool = True
@@ -57,7 +57,7 @@ class Args:
 
 
     # C51 Algorithm specific arguments
-    task: str = "DeliverCoffeeAndMail" #DeliverCoffee or DeliverCoffeeAndMail
+    task: str = "DeliverCoffeeAndMail"  # DeliverCoffee, DeliverCoffeeAndMail, PatrolAB, PatrolABC
     """the task to run the experiments on"""
 
     @property
@@ -77,7 +77,7 @@ class Args:
     v_min: float = -10
     """the return lower bound"""
 
-    v_max: float = 2
+    v_max: float = 10
     """the return upper bound"""
 
     buffer_size: int = 100_000
@@ -95,10 +95,10 @@ class Args:
     start_e: float = 1
     """the starting epsilon for exploration"""
 
-    end_e: float = 0.05
+    end_e: float = 0.01
     """the ending epsilon for exploration"""
 
-    exploration_fraction: float = 0.6
+    exploration_fraction: float = 0.2
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
 
     learning_starts: int = 5000

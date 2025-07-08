@@ -20,6 +20,7 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 import warnings
 from dotenv import load_dotenv
+
 load_dotenv(".env")
 WANDB_KEY = os.getenv("WANDB_KEY")
 warnings.filterwarnings("ignore")
@@ -77,11 +78,11 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 if __name__ == "__main__":
     start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     args = tyro.cli(Args)
-    run_name = f"OfficeWorld-DQN_{args.env_id}__seed={args.seed}__{start_datetime}"
+    run_name = f"OfficeWorld-DQNbase_{args.env_id}__seed={args.seed}__{start_datetime}"
     if args.track:
         import wandb
 
-        wandb.tensorboard.patch(root_logdir=f"DQN/runs/{run_name}/train")
+        wandb.tensorboard.patch(root_logdir=f"DQNbase/runs/{run_name}/train")
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -90,9 +91,9 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"OfficeWorld-DQN_{args.exploration_fraction}_{args.run_code}",
+            group=f"OfficeWorld-DQNbase_{args.exploration_fraction}_{args.run_code}",
         )
-    writer = SummaryWriter(f"DQN/runs/{run_name}/train")
+    writer = SummaryWriter(f"DQNbase/runs/{run_name}/train")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
@@ -150,58 +151,46 @@ if __name__ == "__main__":
             global_step,
         )
         if random.random() < epsilon:
-            suggested_actions = envs.envs[0].guide_agent()
-            weights = [0.2] * envs.single_action_space.n
-            for action in suggested_actions:
-                weights[action] = 0.8
-            weights = weights / np.sum(weights)
-            actions = np.random.choice(
-                envs.single_action_space.n, size=envs.num_envs, p=weights
+            actions = np.array(
+                [envs.single_action_space.sample() for _ in range(envs.num_envs)]
             )
         else:
-            q_values = q_network(torch.Tensor(obs).float().to(device))
-            suggested_actions = envs.envs[0].guide_agent()
-            weights = [0.2] * envs.single_action_space.n
-            for action in suggested_actions:
-                weights[action] = 0.8
-            q_values = q_values * (1 + (epsilon * torch.Tensor(weights).to(device)))
+            q_values = q_network(torch.Tensor(obs).to(device))
             actions = torch.argmax(q_values, dim=1).cpu().numpy()
 
-        # TRY NOT TO MODIFY: execute the game and log data.True
-        # print(f"global_step={global_step}, actions={actions}, epsilon={epsilon:.2f}")
+        # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, dones, infos = envs.step(actions)
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        for info in infos:
-            if "episode" in info.keys():
-                writer.add_scalar(
-                    "episodic_return", info["episode"]["r"], global_step
-                )
-                writer.add_scalar(
-                    "episodic_length", info["episode"]["l"], global_step
-                )
-                writer.add_scalar("epsilon", epsilon, global_step)
-                episodes_returns.append(info["episode"]["r"])
-                episodes_lengths.append(info["episode"]["l"])
-                if global_step >= print_step:
-                    old_len_episodes_returns = len_episodes_returns
-                    len_episodes_returns = len(episodes_returns)
-                    print_num_eps = len_episodes_returns - old_len_episodes_returns
-                    mean_ep_return = np.mean(episodes_returns[-print_num_eps :])
-                    mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps :])
-                    tot_mean_return = np.mean(episodes_returns)
-                    tot_mean_length = np.mean(episodes_lengths)
-                    tqdm.write(
-                        f"global_step={global_step}, mean_return_last_{print_num_eps}_episodes={mean_ep_return}, tot_mean_ret={tot_mean_return}, mean_length_last_{print_num_eps}_episodes={mean_ep_lengths}, tot_mean_len={tot_mean_length}, epsilon={epsilon:.2f}"
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                if info and "episode" in info:
+                    writer.add_scalar(
+                        "episodic_return", float(info["episode"]["r"][0]), global_step
                     )
-                    print_step += args.print_step
-                break
+                    writer.add_scalar(
+                        "episodic_length", float(info["episode"]["l"][0]), global_step
+                    )
+                    episodes_returns.append(float(info["episode"]["r"][0]))
+                    episodes_lengths.append(float(info["episode"]["l"][0]))
+                    if global_step >= print_step:
+                        old_len_episodes_returns = len_episodes_returns
+                        len_episodes_returns = len(episodes_returns)
+                        print_num_eps = len_episodes_returns - old_len_episodes_returns
+                        mean_ep_return = np.mean(episodes_returns[-print_num_eps:])
+                        mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps:])
+                        tot_mean_return = np.mean(episodes_returns)
+                        tot_mean_length = np.mean(episodes_lengths)
+                        tqdm.write(
+                            f"global_step={global_step}, mean_return_last_{print_num_eps}_episodes={mean_ep_return}, tot_mean_ret={tot_mean_return}, mean_length_last_{print_num_eps}_episodes={mean_ep_lengths}, tot_mean_len={tot_mean_length}, epsilon={epsilon:.2f}"
+                        )
+                        print_step += args.print_step
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
         real_next_obs = next_obs.copy()
-        # for idx, d in enumerate(dones):
-        #     if d:
-        #         real_next_obs[idx] = infos[idx]["terminal_observation"]
+        for idx, d in enumerate(dones):
+            if d:
+                real_next_obs[idx] = infos[idx]["terminal_observation"]
         rb.add(obs, real_next_obs, actions, rewards, dones, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook

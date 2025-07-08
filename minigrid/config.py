@@ -21,7 +21,7 @@ class Args:
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "8x8_1key_v2"
+    run_code: str = "8x8_1key_v11"
     """the group of the run"""
 
     torch_deterministic: bool = True
@@ -98,7 +98,7 @@ class Args:
     start_e: float = 1
     """the starting epsilon for exploration"""
 
-    end_e: float = 0.2
+    end_e: float = 0.05
     """the ending epsilon for exploration"""
 
     exploration_fraction: float = 0.4

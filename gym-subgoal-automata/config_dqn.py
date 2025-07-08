@@ -12,14 +12,14 @@ WANDB_ENTITY = os.getenv("WANDB_ENTITY")
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 23
     """seed of the experiment"""
-    run_code: str = "DeliverCoffeeAndMail_v63"
+    run_code: str = "PatrolABC_TEST_3"
     """the group of the run"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    # device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    device: str = "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    # device: str = "cpu"
     # """the device to run the experiment on (set it to cuda if using GPU)"""
     track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
@@ -41,7 +41,7 @@ class Args:
 
     # Algorithm specific arguments
 
-    task: str = "DeliverCoffeeAndMail"  # DeliverCoffee or DeliverCoffeeAndMail
+    task: str = "PatrolABC"  # DeliverCoffee or DeliverCoffeeAndMail
     """the task to run the experiments on"""
     @property
     def env_id(self) -> str:
@@ -61,15 +61,15 @@ class Args:
     """the target network update rate"""
     target_network_frequency: int = 500
     """the timesteps it takes to update the target network"""
-    batch_size: int = 32
+    batch_size: int = 64
     """the batch size of sample from the reply memory"""
     start_e: float = 1
     """the starting epsilon for exploration"""
     end_e: float = 0.05
     """the ending epsilon for exploration"""
-    exploration_fraction: float = 0.2
+    exploration_fraction: float = 0.3
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 5000
+    learning_starts: int = 10
     """timestep to start learning"""
     train_frequency: int = 1
     """the frequency of training"""

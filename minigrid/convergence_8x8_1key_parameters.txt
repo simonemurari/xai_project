@@ -1,7 +1,7 @@
-    total_timesteps: int = 3_000_000
+    total_timesteps: int = 6_000_000
     """total timesteps of the experiments"""
     
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 2e-4
     """the learning rate of the optimizer"""
 
     n_atoms: int = 51
@@ -13,13 +13,13 @@
     v_max: float = 1
     """the return upper bound"""
 
-    buffer_size: int = 500_000
+    buffer_size: int = 1_000_000
     """the replay memory buffer size"""
 
     gamma: float = 0.99
     """the discount factor gamma"""
 
-    target_network_frequency: int = 1000
+    target_network_frequency: int = 5000
     """the timesteps it takes to update the target network"""
 
     batch_size: int = 128
@@ -31,11 +31,11 @@
     end_e: float = 0.05
     """the ending epsilon for exploration"""
 
-    exploration_fraction: float = 0.3
+    exploration_fraction: float = 0.4
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
 
-    learning_starts: int = 50_000 
+    learning_starts: int = 100_000 
     """timestep to start learning"""
 
-    train_frequency: int = 2
+    train_frequency: int = 4
     """the frequency of training"""
