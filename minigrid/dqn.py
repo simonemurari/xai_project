@@ -72,7 +72,7 @@ if __name__ == "__main__":
     start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"DQNbase_{args.env_id}__{args.exp_name}__{args.seed}__{start_datetime}"
     if args.track:
         import wandb
 
@@ -133,7 +133,7 @@ if __name__ == "__main__":
     print_step = args.print_step
 
     print(
-        f"Starting training for {args.total_timesteps} timesteps on {args.env_id} with print_step={print_step}"
+        f"Starting training for {args.total_timesteps} timesteps on {args.env_id} with {args.n_keys} keys, with print_step={print_step}"
     )
 
     # TRY NOT TO MODIFY: start the game

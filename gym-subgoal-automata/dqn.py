@@ -162,35 +162,36 @@ if __name__ == "__main__":
         next_obs, rewards, dones, infos = envs.step(actions)
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                if info and "episode" in info:
-                    writer.add_scalar(
-                        "episodic_return", float(info["episode"]["r"][0]), global_step
+        for info in infos:
+            if "episode" in info.keys():
+                writer.add_scalar(
+                    "episodic_return", info["episode"]["r"], global_step
+                )
+                writer.add_scalar(
+                    "episodic_length", info["episode"]["l"], global_step
+                )
+                writer.add_scalar("epsilon", epsilon, global_step)
+                episodes_returns.append(info["episode"]["r"])
+                episodes_lengths.append(info["episode"]["l"])
+                if global_step >= print_step:
+                    old_len_episodes_returns = len_episodes_returns
+                    len_episodes_returns = len(episodes_returns)
+                    print_num_eps = len_episodes_returns - old_len_episodes_returns
+                    mean_ep_return = np.mean(episodes_returns[-print_num_eps :])
+                    mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps :])
+                    tot_mean_return = np.mean(episodes_returns)
+                    tot_mean_length = np.mean(episodes_lengths)
+                    tqdm.write(
+                        f"global_step={global_step}, mean_return_last_{print_num_eps}_episodes={mean_ep_return}, tot_mean_ret={tot_mean_return}, mean_length_last_{print_num_eps}_episodes={mean_ep_lengths}, tot_mean_len={tot_mean_length}, epsilon={epsilon:.2f}"
                     )
-                    writer.add_scalar(
-                        "episodic_length", float(info["episode"]["l"][0]), global_step
-                    )
-                    episodes_returns.append(float(info["episode"]["r"][0]))
-                    episodes_lengths.append(float(info["episode"]["l"][0]))
-                    if global_step >= print_step:
-                        old_len_episodes_returns = len_episodes_returns
-                        len_episodes_returns = len(episodes_returns)
-                        print_num_eps = len_episodes_returns - old_len_episodes_returns
-                        mean_ep_return = np.mean(episodes_returns[-print_num_eps:])
-                        mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps:])
-                        tot_mean_return = np.mean(episodes_returns)
-                        tot_mean_length = np.mean(episodes_lengths)
-                        tqdm.write(
-                            f"global_step={global_step}, mean_return_last_{print_num_eps}_episodes={mean_ep_return}, tot_mean_ret={tot_mean_return}, mean_length_last_{print_num_eps}_episodes={mean_ep_lengths}, tot_mean_len={tot_mean_length}, epsilon={epsilon:.2f}"
-                        )
-                        print_step += args.print_step
+                    print_step += args.print_step
+                break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
         real_next_obs = next_obs.copy()
-        for idx, d in enumerate(dones):
-            if d:
-                real_next_obs[idx] = infos[idx]["terminal_observation"]
+        # for idx, d in enumerate(dones):
+        #     if d:
+        #         real_next_obs[idx] = infos[idx]["terminal_observation"]
         rb.add(obs, real_next_obs, actions, rewards, dones, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook

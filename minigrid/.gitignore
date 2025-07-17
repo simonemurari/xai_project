@@ -15,9 +15,12 @@ wheels/
 # wandb
 wandb/
 plots/
+NEWplots/
 C51/
 C51rules/
 C51rulesv2/
+C51rulesV2/
+C51rulesv3/
 DQNbase/
 C51rt/
 C51rexp/

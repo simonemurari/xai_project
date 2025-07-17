@@ -21,7 +21,7 @@ class Args:
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "8x8_1key_v11"
+    run_code: str = "8x8_1key_v21"
     """the group of the run"""
 
     torch_deterministic: bool = True
@@ -55,6 +55,8 @@ class Args:
     print_step: int = 200_000
     """the frequency to printout the training progress"""
 
+    rule_influence: float = 1
+    """the influence of the rule-based suggestions on the training process"""
 
     # C51 Algorithm specific arguments
     size_env: int = 8
