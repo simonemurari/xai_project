@@ -17,10 +17,12 @@ wandb/
 plots/
 NEWplots/
 C51/
+OLDPLOTS/
 C51rules/
 C51rulesv2/
 C51rulesV2/
 C51rulesv3/
+C51rulesV3/
 DQNbase/
 C51rt/
 C51rexp/
@@ -36,6 +38,7 @@ run_5_seeds.sh
 run_5_seeds_delayed.sh
 run_1_seed_ALL.sh
 run_5_seeds_ALL.sh
+OLD_c51_rules_v2.py
 
 dqn_rules.py
 config_dqn.py

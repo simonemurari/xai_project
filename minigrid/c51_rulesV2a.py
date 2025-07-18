@@ -152,13 +152,12 @@ def _plot_pmfs(
     x = np.linspace(Args.v_min, Args.v_max, n_categories)
     # Create subplots
     _, axs = plt.subplots(1, 2, figsize=(15, 5))
-    max_pmf = max(np.max(original_pmf), np.max(modified_pmf))
 
     # Plot the original network PMF
     axs[0].plot(x, original_pmf, label="Original PMF", color="skyblue")
     axs[0].set_title(f"{title_prefix} Original PMF - Action {action_index} - eps={alpha:.2f}")
     axs[0].set_xlim(Args.v_min - 0.05, Args.v_max + 0.05)
-    axs[0].set_ylim(0, 1.1 * max_pmf)
+    axs[0].set_ylim(0, 1.05 * max(original_pmf.max(), modified_pmf.max()))
     axs[0].set_xlabel("Return")
     axs[0].set_ylabel("Probability")
     axs[0].legend()
@@ -167,14 +166,14 @@ def _plot_pmfs(
     axs[1].plot(x, modified_pmf, label="Modified PMF", color="salmon")
     axs[1].set_title(f"{title_prefix} Modified PMF - Action {action_index} - eps={alpha:.2f}")
     axs[1].set_xlim(Args.v_min - 0.05, Args.v_max + 0.05)
-    axs[1].set_ylim(0, 1.1 * max_pmf)
+    axs[1].set_ylim(0, 1.05 * max(original_pmf.max(), modified_pmf.max()))
     axs[1].set_xlabel("Return")
     axs[1].set_ylabel("Probability")
     axs[1].legend()
     plt.tight_layout()
-    if not os.path.exists(f"V2plots/rule_influence_{rule_influence:.2f}"):
-        os.makedirs(f"V2plots/rule_influence_{rule_influence:.2f}")
-    plt.savefig(f"V2plots/rule_influence_{rule_influence:.2f}/{title_prefix}_pmfs_{action_index}_{alpha:.2f}_{datetime.now().strftime('%Y_%m_%d-%H_%M_%S')}.png")
+    if not os.path.exists(f'V2aplots/rule_influence_{rule_influence:.2f}'):
+        os.makedirs(f"V2aplots/rule_influence_{rule_influence:.2f}")
+    plt.savefig(f"V2aplots/rule_influence_{rule_influence:.2f}/{title_prefix}_pmfs_{action_index}_{alpha:.2f}_{datetime.now().strftime('%Y_%m_%d-%H_%M_%S')}.png")
     plt.close()
 
 
@@ -216,6 +215,7 @@ class QNetwork(nn.Module):
         # self.plot_rule_distribution()  # Plot the rule PMF
         # assfafsa
         self.plots_done = {0.99: False, 0.90: False, 0.80: False, 0.70: False, 0.60: False, 0.50: False, 0.40: False, 0.30: False, 0.20: False, 0.10: False, 0.05: False}
+        # self.plots = {0.99: False, 0.75: False, 0.5: False, 0.25: False, 0.05: False}
         # Define action mappings (adjust as needed based on your environment)
         self.action_map = {
             "left": 0,  # Turn left
@@ -226,7 +226,7 @@ class QNetwork(nn.Module):
         }
         self.conf_level = 0.8
 
-    def get_action(self, x, stored_rule_actions=None, action=None, skip=False, epsilon=1.0, rule_influence=1.0):
+    def get_action(self, x, stored_rule_actions=None, action=None, skip=False, epsilon=1.0, rule_influence=0.5):
         """
         Vectorized action selection with rule guidance for improved performance.
         The logic is functionally identical to the original but avoids slow Python loops.
@@ -269,59 +269,39 @@ class QNetwork(nn.Module):
                 action = torch.argmax(q_values, dim=1)
             return action, pmfs[torch.arange(batch_size), action], rule_actions_list
 
-        # --- Vectorized PMF Shifting (Optimized for Speed) ---
+        # --- Vectorized PMF Shifting ---
         combined_pmfs = pmfs.clone()
-
-        # Calculate a dynamic shift amount based on epsilon.
-        max_shift = self.n_atoms - 1
-        shift_amount = int(epsilon * max_shift * rule_influence)
+        shift_amount = int(epsilon * rule_influence * self.n_atoms)
 
         if shift_amount > 0:
-            # 1. Create a mask for all actions that should be penalized (shifted left).
-            # This is True where a rule exists AND the action is NOT the one suggested.
+            # Create a mask for actions that should be penalized. This is True where:
+            # 1. A rule exists for the batch item (has_rule_mask)
+            # 2. The action is NOT the one suggested by the rule
             all_actions_grid = torch.arange(self.n, device=device).expand(batch_size, self.n)
             actions_to_penalize_mask = has_rule_mask.unsqueeze(1) & (
                 all_actions_grid != rule_actions_tensor.unsqueeze(1)
             )
 
-            # If no actions need penalizing in the batch, we can skip the rest.
-            if torch.any(actions_to_penalize_mask):
-                # 2. Select only the PMFs that need to be shifted.
-                pmfs_to_shift = pmfs[actions_to_penalize_mask]
-                # print(f"PMFs to shift: {pmfs_to_shift}")
+            # Select only the PMFs that need to be shifted
+            pmfs_to_shift = combined_pmfs[actions_to_penalize_mask]
 
-                # 3. Vectorize the "shift from mean" logic.
-                # Calculate mean values and corresponding mean bin indices for all selected PMFs at once.
-                mean_values = (pmfs_to_shift * self.atoms).sum(dim=1, keepdim=True)
-                # print(f"Mean values for shifting: {mean_values}")
-                mean_bin_indices = (torch.abs(self.atoms - mean_values)).argmin(dim=1)
-                # print(f"Mean bin indices for shifting: {mean_bin_indices}")
+            if pmfs_to_shift.numel() > 0:
+                # Perform the left shift vectorially
+                if shift_amount < self.n_atoms:
+                    # Create zero padding for the right side of the distribution
+                    padding = torch.zeros(
+                        (pmfs_to_shift.shape[0], shift_amount), device=device
+                    )
+                    # Concatenate the sliced end of the PMF with the padding
+                    shifted_pmfs = torch.cat(
+                        (pmfs_to_shift[:, shift_amount:], padding), dim=1
+                    )
+                else:
+                    # If shift amount is too large, move all probability mass to the first atom
+                    shifted_pmfs = torch.zeros_like(pmfs_to_shift)
+                    shifted_pmfs[:, 0] = pmfs_to_shift.sum(dim=1)
 
-                bin_indices_grid = torch.arange(self.n_atoms, device=device).expand_as(pmfs_to_shift)
-                # print(f"Bin indices grid for shifting: {bin_indices_grid}")
-
-                # Calculate the distance of each bin from its distribution's mean bin.
-                distance_from_mean = torch.clamp(mean_bin_indices.unsqueeze(1) - bin_indices_grid, min=0)
-                # print(f"Distance from mean for shifting: {distance_from_mean}")
-
-                # Calculate the shift for each bin. The shift is greatest at the mean and decreases with distance.
-                current_shift = torch.clamp(shift_amount - distance_from_mean, min=0)
-
-                # Calculate the new indices after the leftward shift.
-                new_indices = bin_indices_grid - current_shift
-                # print(f"New indices after shifting: {new_indices}")
-
-                # 4. Move the probability mass in a vectorized way.
-                # Create a destination tensor filled with zeros.
-                shifted_pmfs = torch.zeros_like(pmfs_to_shift)
-                # Use `scatter_add_` for a safe and efficient parallel update. It handles cases where
-                # multiple old bins map to the same new bin by summing their probabilities.
-                # We only consider bins where the new index is valid (>= 0).
-                valid_mask = new_indices >= 0
-                shifted_pmfs.scatter_add_(1, new_indices.long() * valid_mask.long(), pmfs_to_shift * valid_mask)
-                # print(f"Shifted PMFs: {shifted_pmfs}")
-
-                # 5. Place the modified PMFs back into the main tensor.
+                # Place the modified PMFs back into the main tensor
                 combined_pmfs[actions_to_penalize_mask] = shifted_pmfs
 
         # --- Plotting Logic (Optional, for debugging) ---
@@ -376,7 +356,11 @@ class QNetwork(nn.Module):
         # --- Vectorized Normalization ---
         # Normalize the distributions only for batch items where a rule was applied.
         # This ensures that each action's probability distribution sums to 1.
-        combined_pmfs[has_rule_mask] /= combined_pmfs[has_rule_mask].sum(dim=2, keepdim=True)
+        pmfs_with_rules = combined_pmfs[has_rule_mask]
+        sums = pmfs_with_rules.sum(dim=2, keepdim=True)
+        # Add a small epsilon to prevent division by zero
+        sums[sums == 0] = 1.0
+        combined_pmfs[has_rule_mask] = pmfs_with_rules / sums
 
         # --- Final Calculations ---
         q_values = (combined_pmfs * self.atoms).sum(2)
@@ -920,7 +904,7 @@ if __name__ == "__main__":
                     action=data.actions.flatten(),
                     skip=False,
                     epsilon=epsilon,
-                    rule_influence=args.rule_influence
+                    rule_influence=args.rule_influence,
                 )
                 loss = (
                     -(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(

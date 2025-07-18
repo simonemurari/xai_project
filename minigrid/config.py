@@ -55,7 +55,7 @@ class Args:
     print_step: int = 200_000
     """the frequency to printout the training progress"""
 
-    rule_influence: float = 1
+    rule_influence: float = 0.8
     """the influence of the rule-based suggestions on the training process"""
 
     # C51 Algorithm specific arguments
@@ -97,7 +97,7 @@ class Args:
     batch_size: int = 128
     """the batch size of sample from the replay memory"""
 
-    start_e: float = 1
+    start_e: float = 1.0
     """the starting epsilon for exploration"""
 
     end_e: float = 0.05
