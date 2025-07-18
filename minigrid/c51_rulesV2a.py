@@ -147,6 +147,8 @@ def _plot_pmfs(
     # Extract the PMFs for the specified action
     original_pmf = original_pmfs[0, action_index]
     modified_pmf = modified_pmfs[0, action_index]
+    print(f"ACTION {action_index} original_pmf: {original_pmf}")
+    print(f"ACTION {action_index} modified_pmf: {modified_pmf}")
 
     # Map the range to value range
     x = np.linspace(Args.v_min, Args.v_max, n_categories)
@@ -171,9 +173,9 @@ def _plot_pmfs(
     axs[1].set_ylabel("Probability")
     axs[1].legend()
     plt.tight_layout()
-    if not os.path.exists(f'V2aplots/rule_influence_{rule_influence:.2f}'):
-        os.makedirs(f"V2aplots/rule_influence_{rule_influence:.2f}")
-    plt.savefig(f"V2aplots/rule_influence_{rule_influence:.2f}/{title_prefix}_pmfs_{action_index}_{alpha:.2f}_{datetime.now().strftime('%Y_%m_%d-%H_%M_%S')}.png")
+    if not os.path.exists(f'V2aplots/{args.run_code}/rule_influence_{rule_influence:.2f}'):
+        os.makedirs(f"V2aplots/{args.run_code}/rule_influence_{rule_influence:.2f}")
+    plt.savefig(f"V2aplots/{args.run_code}/rule_influence_{rule_influence:.2f}/{title_prefix}_pmfs_{action_index}_{alpha:.2f}_{datetime.now().strftime('%Y_%m_%d-%H_%M_%S')}.png")
     plt.close()
 
 
@@ -314,44 +316,62 @@ class QNetwork(nn.Module):
                         plot_idx = first_rule_idx_tensor[0].item()
                         suggested_action = rule_actions_tensor[plot_idx].item()
                         
-                        # Find a non-suggested action to plot for comparison
-                        non_suggested_action = -1
+                        original_pmf_for_plot = pmfs[plot_idx].unsqueeze(0)
+                        modified_pmf_for_plot = combined_pmfs[plot_idx].unsqueeze(0)
+
+                        # --- PMF Comparison Check ---
+                        # Squeeze to remove the batch dimension of 1 for easier indexing
+                        original_pmfs_to_compare = original_pmf_for_plot.squeeze(0)
+                        modified_pmfs_to_compare = modified_pmf_for_plot.squeeze(0)
+
+                        print("\n--- PMF Comparison Check ---")
+                        # Compare Original PMFs
+                        print("Comparing ORIGINAL PMFs between actions:")
+                        for i in range(self.n):
+                            for j in range(i + 1, self.n):
+                                are_equal = torch.allclose(original_pmfs_to_compare[i], original_pmfs_to_compare[j], atol=1e-6)
+                                print(f"  - Original PMF Action {i} vs Action {j}: {'EQUAL' if are_equal else 'NOT EQUAL'}")
+                        
+                        # Compare Modified PMFs
+                        print("\nComparing MODIFIED PMFs between actions:")
+                        for i in range(self.n):
+                            for j in range(i + 1, self.n):
+                                are_equal = torch.allclose(modified_pmfs_to_compare[i], modified_pmfs_to_compare[j], atol=1e-6)
+                                print(f"  - Modified PMF Action {i} vs Action {j}: {'EQUAL' if are_equal else 'NOT EQUAL'}")
+                        print("--- End of Comparison ---\n")
+
+                        # Determine the numeric prefix for the plot filename
+                        plot_prefix = sorted_eps_keys.index(plot_eps) + 1
+                        if plot_prefix < 10:
+                            plot_prefix = f"0{plot_prefix}"
+                        # Plot 1: The SUGGESTED action
+                        print(f'rule_actions_tensor: {rule_actions_tensor}')
+                        print(f'plot_idx: {plot_idx}, first_rule_idx_tensor: {first_rule_idx_tensor}')
+                        print(f'SUGGESTED ACTION: {suggested_action}')
+                        _plot_pmfs(
+                            original_pmf_for_plot,
+                            modified_pmf_for_plot,
+                            suggested_action,
+                            self.n_atoms,
+                            epsilon,
+                            f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_SUGGESTED_Action_{suggested_action}",
+                            rule_influence
+                        )
                         for act in range(self.n):
                             if act != suggested_action:
                                 non_suggested_action = act
-                                break
-                        
-                        if non_suggested_action != -1:
-                            original_pmf_for_plot = pmfs[plot_idx].unsqueeze(0)
-                            modified_pmf_for_plot = combined_pmfs[plot_idx].unsqueeze(0)
-
-                            # Determine the numeric prefix for the plot filename
-                            plot_prefix = sorted_eps_keys.index(plot_eps) + 1
-
-                            # Plot 1: The SUGGESTED action
-                            _plot_pmfs(
-                                original_pmf_for_plot,
-                                modified_pmf_for_plot,
-                                suggested_action,
-                                self.n_atoms,
-                                epsilon,
-                                f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_Action_{suggested_action}-SUGGESTED",
-                                rule_influence
-                            )
-
-                            # Plot 2: A NOT SUGGESTED action
-                            _plot_pmfs(
-                                original_pmf_for_plot,
-                                modified_pmf_for_plot,
-                                non_suggested_action,
-                                self.n_atoms,
-                                epsilon,
-                                f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_Action_{non_suggested_action}-NOT_SUGGESTED",
-                                rule_influence
-                            )
-
-                            self.plots_done[plot_eps] = True # Mark as done to prevent re-plotting
-                            break # Exit the loop after plotting for this threshold
+                                # Plot 2: A NOT SUGGESTED action
+                                _plot_pmfs(
+                                    original_pmf_for_plot,
+                                    modified_pmf_for_plot,
+                                    non_suggested_action,
+                                    self.n_atoms,
+                                    epsilon,
+                                    f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_NOT_SUGGESTED_Action_{non_suggested_action}",
+                                    rule_influence
+                                )
+                                self.plots_done[plot_eps] = True # Mark as done to prevent re-plotting
+                        break # Exit the loop after plotting for this threshold
 
         # --- Vectorized Normalization ---
         # Normalize the distributions only for batch items where a rule was applied.
@@ -725,10 +745,10 @@ if __name__ == "__main__":
 
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"C51rulesV2_{args.env_id}__seed{args.seed}__{start_datetime}"
+    run_name = f"C51rulesV2a_{args.env_id}__seed{args.seed}__{start_datetime}"
     if args.track:
         import wandb
-        wandb.tensorboard.patch(root_logdir=f"C51rulesV2/runs_rules_training/{run_name}/train")
+        wandb.tensorboard.patch(root_logdir=f"C51rulesV2a/runs_rules_training/{run_name}/train")
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -737,9 +757,9 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rules_{args.exploration_fraction}_{args.run_code}",
+            group=f"C51rulesV2a_ri{args.rule_influence}_{args.run_code}",
         )
-    writer = SummaryWriter(f"C51rulesV2/runs_rules_training/{run_name}/train")
+    writer = SummaryWriter(f"C51rulesV2a/runs_rules_training/{run_name}/train")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
@@ -934,13 +954,13 @@ if __name__ == "__main__":
                 target_network.load_state_dict(q_network.state_dict())
 
     plt.plot(episodes_returns)
-    plt.title(f'C51rulesV2 on {args.env_id} - Return over {args.total_timesteps} timesteps')
+    plt.title(f'C51rulesV2a on {args.env_id} - Return over {args.total_timesteps} timesteps')
     plt.xlabel("Episode")
     plt.ylabel("Return")
     plt.grid(True)
-    path = f'C51rulesV2/{args.env_id}_C51rules_{args.total_timesteps}_{start_datetime}'
-    if not os.path.exists("C51rulesV2/"):
-        os.makedirs("C51rulesV2/")
+    path = f'C51rulesV2a/{args.env_id}_C51rules_{args.total_timesteps}_{start_datetime}'
+    if not os.path.exists("C51rulesV2a/"):
+        os.makedirs("C51rulesV2a/")
     os.makedirs(path)
     plt.savefig(f"{path}/{args.env_id}_C51rules_{args.total_timesteps}_{start_datetime}.png")
     plt.close()
@@ -971,12 +991,12 @@ if __name__ == "__main__":
             device=device,
             epsilon=0
         )
-        writer = SummaryWriter(f"C51rulesV2/runs_rules_training/{run_name}/eval")
+        writer = SummaryWriter(f"C51rulesV2a/runs_rules_training/{run_name}/eval")
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("episodic_return", episodic_return, idx)
 
         plt.plot(episodic_returns)
-        plt.title(f'C51rulesV2 Eval on {args.env_id} - Return over {eval_episodes} episodes')
+        plt.title(f'C51rulesV2a Eval on {args.env_id} - Return over {eval_episodes} episodes')
         plt.xlabel("Episode")
         plt.ylabel("Return")
         plt.ylim(0, 1)
@@ -988,7 +1008,7 @@ if __name__ == "__main__":
 
             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
             repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "C51rulesV2", f"runs/{run_name}", f"videos/{run_name}-eval")
+            push_to_hub(args, episodic_returns, repo_id, "C51rulesV2a", f"runs/{run_name}", f"videos/{run_name}-eval")
 
     envs.close()
     writer.close()

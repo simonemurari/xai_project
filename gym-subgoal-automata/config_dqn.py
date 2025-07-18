@@ -69,7 +69,7 @@ class Args:
     """the ending epsilon for exploration"""
     exploration_fraction: float = 0.3
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 10
+    learning_starts: int = 1000
     """timestep to start learning"""
     train_frequency: int = 1
     """the frequency of training"""

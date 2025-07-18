@@ -15,13 +15,13 @@ class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
 
-    seed: int = 47235
+    seed: int = 24
     """seed of the experiment"""
 
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "8x8_1key_v21"
+    run_code: str = "8x8_1key_v3"
     """the group of the run"""
 
     torch_deterministic: bool = True

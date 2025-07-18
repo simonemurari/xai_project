@@ -334,44 +334,38 @@ class QNetwork(nn.Module):
                         plot_idx = first_rule_idx_tensor[0].item()
                         suggested_action = rule_actions_tensor[plot_idx].item()
                         
-                        # Find a non-suggested action to plot for comparison
-                        non_suggested_action = -1
+                        original_pmf_for_plot = pmfs[plot_idx].unsqueeze(0)
+                        modified_pmf_for_plot = combined_pmfs[plot_idx].unsqueeze(0)
+
+                        # Determine the numeric prefix for the plot filename
+                        plot_prefix = sorted_eps_keys.index(plot_eps) + 1
+                        if plot_prefix < 10:
+                            plot_prefix = f"0{plot_prefix}"
+                        # Plot 1: The SUGGESTED action
+                        _plot_pmfs(
+                            original_pmf_for_plot,
+                            modified_pmf_for_plot,
+                            suggested_action,
+                            self.n_atoms,
+                            epsilon,
+                            f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_SUGGESTED_Action_{suggested_action}",
+                            rule_influence
+                        )
                         for act in range(self.n):
                             if act != suggested_action:
                                 non_suggested_action = act
-                                break
-                        
-                        if non_suggested_action != -1:
-                            original_pmf_for_plot = pmfs[plot_idx].unsqueeze(0)
-                            modified_pmf_for_plot = combined_pmfs[plot_idx].unsqueeze(0)
-
-                            # Determine the numeric prefix for the plot filename
-                            plot_prefix = sorted_eps_keys.index(plot_eps) + 1
-
-                            # Plot 1: The SUGGESTED action
-                            _plot_pmfs(
-                                original_pmf_for_plot,
-                                modified_pmf_for_plot,
-                                suggested_action,
-                                self.n_atoms,
-                                epsilon,
-                                f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_Action_{suggested_action}-SUGGESTED",
-                                rule_influence
-                            )
-
-                            # Plot 2: A NOT SUGGESTED action
-                            _plot_pmfs(
-                                original_pmf_for_plot,
-                                modified_pmf_for_plot,
-                                non_suggested_action,
-                                self.n_atoms,
-                                epsilon,
-                                f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_Action_{non_suggested_action}-NOT_SUGGESTED",
-                                rule_influence
-                            )
-
-                            self.plots_done[plot_eps] = True # Mark as done to prevent re-plotting
-                            break # Exit the loop after plotting for this threshold
+                                # Plot 2: A NOT SUGGESTED action
+                                _plot_pmfs(
+                                    original_pmf_for_plot,
+                                    modified_pmf_for_plot,
+                                    non_suggested_action,
+                                    self.n_atoms,
+                                    epsilon,
+                                    f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_NOT_SUGGESTED_Action_{non_suggested_action}",
+                                    rule_influence
+                                )
+                                self.plots_done[plot_eps] = True # Mark as done to prevent re-plotting
+                        break # Exit the loop after plotting for this threshold
 
         # --- Vectorized Normalization ---
         # Normalize the distributions only for batch items where a rule was applied.
@@ -753,7 +747,7 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"C51rules_{args.exploration_fraction}_{args.run_code}",
+            group=f"C51rulesV2_ri{args.rule_influence}_{args.run_code}",
         )
     writer = SummaryWriter(f"C51rulesV2/runs_rules_training/{run_name}/train")
     writer.add_text(
