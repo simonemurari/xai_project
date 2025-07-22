@@ -15,13 +15,13 @@ class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
 
-    seed: int = 24
+    seed: int = 23
     """seed of the experiment"""
 
     num_envs: int = 1
     """the number of parallel game environments"""
 
-    run_code: str = "8x8_1key_v3"
+    run_code: str = "8x8_1key_end_e0.2"
     """the group of the run"""
 
     torch_deterministic: bool = True
@@ -55,7 +55,7 @@ class Args:
     print_step: int = 200_000
     """the frequency to printout the training progress"""
 
-    rule_influence: float = 0.8
+    rule_influence: float = 0.4
     """the influence of the rule-based suggestions on the training process"""
 
     # C51 Algorithm specific arguments
@@ -100,7 +100,7 @@ class Args:
     start_e: float = 1.0
     """the starting epsilon for exploration"""
 
-    end_e: float = 0.05
+    end_e: float = 0.2
     """the ending epsilon for exploration"""
 
     exploration_fraction: float = 0.4

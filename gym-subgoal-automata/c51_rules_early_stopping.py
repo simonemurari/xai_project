@@ -1,4 +1,4 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/C51rtv3/#c51py
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/C51rules/#c51py
 import random
 import time
 from datetime import datetime
@@ -230,12 +230,12 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 if __name__ == "__main__":
     start_datetime = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     args = tyro.cli(Args)
-    run_name = f"C51rtv3_{args.env_id}__seed={args.seed}__{start_datetime}"
+    run_name = f"C51rules_{args.env_id}__seed={args.seed}__{start_datetime}"
     if args.track:
         import wandb
 
         # wandb.login(key=WANDB_KEY)
-        wandb.tensorboard.patch(root_logdir=f"C51rtv3/runs/{run_name}/train")
+        wandb.tensorboard.patch(root_logdir=f"C51rules/runs/{run_name}/train")
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -244,9 +244,9 @@ if __name__ == "__main__":
             name=run_name,
             monitor_gym=True,
             save_code=True,
-            group=f"OfficeWorld-C51rtv3_{args.exploration_fraction}_{args.run_code}",
+            group=f"OfficeWorld-C51rules_{args.exploration_fraction}_{args.run_code}",
         )
-    writer = SummaryWriter(f"C51rtv3/runs/{run_name}/train")
+    writer = SummaryWriter(f"C51rules/runs/{run_name}/train")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
@@ -342,9 +342,9 @@ if __name__ == "__main__":
                     mean_ep_lengths = np.mean(episodes_lengths[-print_num_eps:])
                     tot_mean_return = np.mean(episodes_returns)
                     tot_mean_length = np.mean(episodes_lengths)
-                    if (print_num_eps >= 3500 and mean_ep_return < 0.1) or (
-                        mean_ep_return < -5
-                        and global_step / args.total_timesteps >= 0.5
+                    if (
+                        mean_ep_return < 0.4
+                        and global_step / args.total_timesteps >= 0.25
                     ):
                         tqdm.write(
                             f"Stopping early after {(global_step / args.total_timesteps) * 100:.2f}% of timesteps"
@@ -481,7 +481,7 @@ if __name__ == "__main__":
                 args,
                 episodic_returns,
                 repo_id,
-                "C51rtv3",
+                "C51rules",
                 f"runs/{run_name}",
                 f"videos/{run_name}-eval",
             )

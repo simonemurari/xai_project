@@ -125,20 +125,10 @@ class RuleAugmentedReplayBuffer(ReplayBuffer):
     
 
 def _plot_pmfs(
-    original_pmfs, modified_pmfs, action_index, n_categories, alpha, title_prefix, rule_influence=1.0
+    original_pmfs, modified_pmfs, action_index, n_categories, alpha, title_prefix, rule_influence=1.0, episode_step=0, plot_type="exploit"
 ):
     """
     Plots the PMFs for original network action, modified action, and their combined probabilities.
-
-      Args:
-          original_pmfs (torch.Tensor): Original PMF from the neural network (1, num_actions, num_categories).
-          modified_pmfs (torch.Tensor): Modified PMF after rule application (1, num_actions, num_categories).
-          combined_pmfs (torch.Tensor): Combined PMF (same as modified in current implementation) (1, num_actions, num_categories).
-          action_index (int): The index of the action to plot.
-          n_categories (int): Number of categories (atoms) in the PMFs
-          alpha (float): The epsilon value for exploration
-          title_prefix (string): A prefix to add to the titles of the plots
-
     """
     # Make sure the input tensors are in CPU
     original_pmfs = original_pmfs.cpu().detach().numpy()
@@ -147,8 +137,6 @@ def _plot_pmfs(
     # Extract the PMFs for the specified action
     original_pmf = original_pmfs[0, action_index]
     modified_pmf = modified_pmfs[0, action_index]
-    print(f"ACTION {action_index} original_pmf: {original_pmf}")
-    print(f"ACTION {action_index} modified_pmf: {modified_pmf}")
 
     # Map the range to value range
     x = np.linspace(Args.v_min, Args.v_max, n_categories)
@@ -157,25 +145,29 @@ def _plot_pmfs(
 
     # Plot the original network PMF
     axs[0].plot(x, original_pmf, label="Original PMF", color="skyblue")
-    axs[0].set_title(f"{title_prefix} Original PMF - Action {action_index} - eps={alpha:.2f}")
+    axs[0].set_title(f"PMF_{title_prefix}_EP={episode_step}_Eps={alpha:.2f}_Act={action_index}")
     axs[0].set_xlim(Args.v_min - 0.05, Args.v_max + 0.05)
-    axs[0].set_ylim(0, 1.05 * max(original_pmf.max(), modified_pmf.max()))
+    axs[0].set_ylim(0, 1.05 * max(original_pmf.max(), modified_pmf.max(), 0.01))
     axs[0].set_xlabel("Return")
     axs[0].set_ylabel("Probability")
     axs[0].legend()
 
     # Plot the modified PMF (after rule application)
     axs[1].plot(x, modified_pmf, label="Modified PMF", color="salmon")
-    axs[1].set_title(f"{title_prefix} Modified PMF - Action {action_index} - eps={alpha:.2f}")
+    axs[1].set_title(f"NEWPMF_{title_prefix}_EP={episode_step}_Eps={alpha:.2f}_Act={action_index}")
     axs[1].set_xlim(Args.v_min - 0.05, Args.v_max + 0.05)
-    axs[1].set_ylim(0, 1.05 * max(original_pmf.max(), modified_pmf.max()))
+    axs[1].set_ylim(0, 1.05 * max(original_pmf.max(), modified_pmf.max(), 0.01))
     axs[1].set_xlabel("Return")
     axs[1].set_ylabel("Probability")
     axs[1].legend()
     plt.tight_layout()
-    if not os.path.exists(f'V2aplots/{args.run_code}/rule_influence_{rule_influence:.2f}'):
-        os.makedirs(f"V2aplots/{args.run_code}/rule_influence_{rule_influence:.2f}")
-    plt.savefig(f"V2aplots/{args.run_code}/rule_influence_{rule_influence:.2f}/{title_prefix}_pmfs_{action_index}_{alpha:.2f}_{datetime.now().strftime('%Y_%m_%d-%H_%M_%S')}.png")
+    
+    # Create directory structure based on epsilon and rule influence
+    plot_dir = Path(f"V2aplots/{args.run_code}/epsilon_{alpha:.2f}/rule_influence_{rule_influence:.2f}/{plot_type}")
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save the plot with a detailed filename
+    plt.savefig(plot_dir / f"{title_prefix}_EPstep={episode_step}.png")
     plt.close()
 
 
@@ -185,7 +177,7 @@ def make_env(env_id, seed, n_keys, idx, capture_video, run_name):
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id, n_keys=n_keys)
+            env = gym.make(env_id, n_keys=n_keys, render_mode="rgb_array")
             env = gym.wrappers.FlattenObservation(
                 gym.wrappers.FilterObservation(env, filter_keys=["image", "direction"])
             )
@@ -214,21 +206,32 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(128, self.n * n_atoms),
         )
-        # self.plot_rule_distribution()  # Plot the rule PMF
-        # assfafsa
-        self.plots_done = {0.99: False, 0.90: False, 0.80: False, 0.70: False, 0.60: False, 0.50: False, 0.40: False, 0.30: False, 0.20: False, 0.10: False, 0.05: False}
-        # self.plots = {0.99: False, 0.75: False, 0.5: False, 0.25: False, 0.05: False}
+        
+        # --- Plotting State ---
+        self.plotting_epsilons = {0.8, 0.6, 0.4, 0.2}
+        self.plotted_epsilons = set()
+        self.is_plotting_episode = False
+        self.exploit_plot_step_count = 0
+        self.train_plot_step_count = 0
+        self.plotting_episode_epsilon = 0
+        self.max_plotting_steps = 10
+        self.episode_steps_count = 0  # Track steps in the current episode for plotting
+        
         # Define action mappings (adjust as needed based on your environment)
         self.action_map = {
             "left": 0,  # Turn left
             "right": 1,  # Turn right
             "forward": 2,  # Move forward
             "pickup": 3,  # Pickup object
+            "drop (UNUSED)": 4,  # Drop object (not used in this context)
             "toggle": 5,  # Open door
+            "done (UNUSED)": 6,  # Mark as done (not used in this context)
         }
+        # Create a reverse map for easy lookup of action names
+        self.action_id_to_name = {v: k for k, v in self.action_map.items()}
         self.conf_level = 0.8
 
-    def get_action(self, x, stored_rule_actions=None, action=None, skip=False, epsilon=1.0, rule_influence=0.5):
+    def get_action(self, x, stored_rule_actions=None, action=None, skip=False, epsilon=1.0, rule_influence=0.5, global_step=0, is_exploit_step=False):
         """
         Vectorized action selection with rule guidance for improved performance.
         The logic is functionally identical to the original but avoids slow Python loops.
@@ -306,80 +309,93 @@ class QNetwork(nn.Module):
                 # Place the modified PMFs back into the main tensor
                 combined_pmfs[actions_to_penalize_mask] = shifted_pmfs
 
-        # --- Plotting Logic (Optional, for debugging) ---
-            # Get a sorted list of epsilon thresholds to create an ordered prefix for filenames
-            sorted_eps_keys = sorted(self.plots_done.keys(), reverse=True)
-            for plot_eps, done in self.plots_done.items():
-                if not done and epsilon <= plot_eps:
-                    first_rule_idx_tensor = torch.where(has_rule_mask)[0]
-                    if len(first_rule_idx_tensor) > 0:
-                        plot_idx = first_rule_idx_tensor[0].item()
-                        suggested_action = rule_actions_tensor[plot_idx].item()
-                        
-                        original_pmf_for_plot = pmfs[plot_idx].unsqueeze(0)
-                        modified_pmf_for_plot = combined_pmfs[plot_idx].unsqueeze(0)
+         # --- Episodic Plotting Activation (only during exploitation) ---
+        if is_exploit_step and not self.is_plotting_episode:
+            for plot_eps in self.plotting_epsilons:
+                if epsilon <= plot_eps and plot_eps not in self.plotted_epsilons:
+                    self.is_plotting_episode = True
+                    self.plotting_episode_epsilon = plot_eps
+                    self.plotted_epsilons.add(plot_eps)
+                    # Reset counters for the new plotting episode
+                    self.exploit_plot_step_count = 0
+                    self.train_plot_step_count = 0
+                    print(f"--- Starting plotting episode for epsilon {plot_eps} (Global Step: {global_step}) ---")
+                    break
 
-                        # --- PMF Comparison Check ---
-                        # Squeeze to remove the batch dimension of 1 for easier indexing
-                        original_pmfs_to_compare = original_pmf_for_plot.squeeze(0)
-                        modified_pmfs_to_compare = modified_pmf_for_plot.squeeze(0)
+        if not self.is_plotting_episode: # Only check if not already plotting
+            for plot_eps in self.plotting_epsilons:
+                if epsilon <= plot_eps and plot_eps not in self.plotted_epsilons:
+                    self.is_plotting_episode = True
+                    self.plotting_episode_epsilon = plot_eps
+                    self.plotted_epsilons.add(plot_eps)
+                    print(f"--- Starting plotting episode for epsilon {plot_eps} (Global Step: {global_step}) ---")
+                    break
+                # --- In-Episode Plotting Execution ---
+        # --- In-Episode Plotting Execution ---
+        if self.is_plotting_episode:
+            plot_this_step = False
+            plot_type = ""
+            current_plot_step = 0
 
-                        print("\n--- PMF Comparison Check ---")
-                        # Compare Original PMFs
-                        print("Comparing ORIGINAL PMFs between actions:")
-                        for i in range(self.n):
-                            for j in range(i + 1, self.n):
-                                are_equal = torch.allclose(original_pmfs_to_compare[i], original_pmfs_to_compare[j], atol=1e-6)
-                                print(f"  - Original PMF Action {i} vs Action {j}: {'EQUAL' if are_equal else 'NOT EQUAL'}")
-                        
-                        # Compare Modified PMFs
-                        print("\nComparing MODIFIED PMFs between actions:")
-                        for i in range(self.n):
-                            for j in range(i + 1, self.n):
-                                are_equal = torch.allclose(modified_pmfs_to_compare[i], modified_pmfs_to_compare[j], atol=1e-6)
-                                print(f"  - Modified PMF Action {i} vs Action {j}: {'EQUAL' if are_equal else 'NOT EQUAL'}")
-                        print("--- End of Comparison ---\n")
+            if is_exploit_step and self.exploit_plot_step_count < self.max_plotting_steps:
+                plot_this_step = True
+                plot_type = "exploit"
+                current_plot_step = self.exploit_plot_step_count
+                self.exploit_plot_step_count += 1
+            
+            elif not is_exploit_step and self.train_plot_step_count < self.max_plotting_steps:
+                plot_this_step = True
+                plot_type = "training"
+                current_plot_step = self.train_plot_step_count
+                self.train_plot_step_count += 1
 
-                        # Determine the numeric prefix for the plot filename
-                        plot_prefix = sorted_eps_keys.index(plot_eps) + 1
-                        if plot_prefix < 10:
-                            plot_prefix = f"0{plot_prefix}"
-                        # Plot 1: The SUGGESTED action
-                        print(f'rule_actions_tensor: {rule_actions_tensor}')
-                        print(f'plot_idx: {plot_idx}, first_rule_idx_tensor: {first_rule_idx_tensor}')
-                        print(f'SUGGESTED ACTION: {suggested_action}')
-                        _plot_pmfs(
-                            original_pmf_for_plot,
-                            modified_pmf_for_plot,
-                            suggested_action,
-                            self.n_atoms,
-                            epsilon,
-                            f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_SUGGESTED_Action_{suggested_action}",
-                            rule_influence
-                        )
-                        for act in range(self.n):
-                            if act != suggested_action:
-                                non_suggested_action = act
-                                # Plot 2: A NOT SUGGESTED action
-                                _plot_pmfs(
-                                    original_pmf_for_plot,
-                                    modified_pmf_for_plot,
-                                    non_suggested_action,
-                                    self.n_atoms,
-                                    epsilon,
-                                    f"{plot_prefix}_Eps_{plot_eps:.2f}_RulInf_{rule_influence}_NOT_SUGGESTED_Action_{non_suggested_action}",
-                                    rule_influence
-                                )
-                                self.plots_done[plot_eps] = True # Mark as done to prevent re-plotting
-                        break # Exit the loop after plotting for this threshold
+            if plot_this_step:
+                plot_idx = 0  # Plot the first item in the batch
+                suggested_action = rule_actions_tensor[plot_idx].item()
+                
+                original_pmf_for_plot = pmfs[plot_idx].unsqueeze(0)
+                modified_pmf_for_plot = combined_pmfs[plot_idx].unsqueeze(0)
+
+                # Plot PMF for every action
+                for act_id in range(self.n):
+                    action_name = self.action_id_to_name.get(act_id, f"Action_{act_id}")
+                    is_suggested = "SUGGESTED" if act_id == suggested_action else "NOT_SUGGESTED"
+                    title_prefix = f"GLstep={global_step}_{is_suggested}_{action_name}"
+
+                    _plot_pmfs(
+                        original_pmf_for_plot,
+                        modified_pmf_for_plot,
+                        act_id,
+                        self.n_atoms,
+                        self.plotting_episode_epsilon,
+                        title_prefix,
+                        rule_influence,
+                        episode_step=self.episode_steps_count,
+                        plot_type=plot_type,
+                    )
+                
+                # --- Custom Logging (Exploit vs. Training) ---
+                plot_dir = Path(f"V2aplots/{args.run_code}/epsilon_{self.plotting_episode_epsilon:.2f}/rule_influence_{rule_influence:.2f}/{plot_type}")
+                plot_dir.mkdir(parents=True, exist_ok=True)
+
+                if plot_type == "exploit":
+                    grid_img = self.env.envs[0].render()
+                    plt.imsave(plot_dir / f"GLstep={global_step}_EPstep={self.episode_steps_count}_GRID.png", grid_img)
+                
+                elif plot_type == "training":
+                    obs_for_log = self.get_observables(x[plot_idx].unsqueeze(0).cpu().numpy()[:, 4:])
+                    log_filename = plot_dir / f"GLstep={global_step}_EPstep={self.episode_steps_count}_OBSERVABLE.txt"
+                    with open(log_filename, "w") as f:
+                        import json
+                        f.write(json.dumps(obs_for_log, indent=2, default=str))
+
+                print(f"--- Plotting step {current_plot_step + 1}/{self.max_plotting_steps} ({plot_type}) for epsilon = {self.plotting_episode_epsilon} ---")
 
         # --- Vectorized Normalization ---
         # Normalize the distributions only for batch items where a rule was applied.
         # This ensures that each action's probability distribution sums to 1.
         pmfs_with_rules = combined_pmfs[has_rule_mask]
         sums = pmfs_with_rules.sum(dim=2, keepdim=True)
-        # Add a small epsilon to prevent division by zero
-        sums[sums == 0] = 1.0
         combined_pmfs[has_rule_mask] = pmfs_with_rules / sums
 
         # --- Final Calculations ---
@@ -846,15 +862,26 @@ if __name__ == "__main__":
             # Updated to use the new get_action method that returns rule_actions
             actions, pmf, rule_actions = q_network.get_action(
                 torch.Tensor(obs).float().to(device), skip=False, epsilon=epsilon,
-                rule_influence=args.rule_influence
+                rule_influence=args.rule_influence, global_step=global_step,
+                is_exploit_step=True
             )
             if isinstance(actions, torch.Tensor):
                 actions = actions.cpu().numpy()
             else:
                 actions = np.array([actions])
+        q_network.episode_steps_count += 1
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
+
+        # --- Reset plotting state on episode end ---
+        if terminations[0] or truncations[0]:
+            q_network.episode_steps_count = 0
+            if q_network.is_plotting_episode:
+                q_network.is_plotting_episode = False
+                q_network.exploit_plot_step_count = 0
+                q_network.train_plot_step_count = 0
+                print("--- Episode ended, resetting plotting state. ---")
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
@@ -925,6 +952,8 @@ if __name__ == "__main__":
                     skip=False,
                     epsilon=epsilon,
                     rule_influence=args.rule_influence,
+                    global_step=global_step,
+                    is_exploit_step=False
                 )
                 loss = (
                     -(target_pmfs * old_pmfs.clamp(min=1e-5, max=1 - 1e-5).log()).sum(
